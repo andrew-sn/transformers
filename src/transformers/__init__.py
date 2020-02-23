@@ -160,6 +160,14 @@ if is_torch_available():
         load_tf_weights_in_bert,
         BERT_PRETRAINED_MODEL_ARCHIVE_MAP,
     )
+    from .bert_crf import (
+        BertCrfForTokenClassification,
+        BertCrfConfig,
+        precision_score,
+        recall_score,
+        f1_score,
+        classification_report
+        )
     from .modeling_openai import (
         OpenAIGPTPreTrainedModel,
         OpenAIGPTModel,
