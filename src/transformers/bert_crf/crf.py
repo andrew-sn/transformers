@@ -42,21 +42,23 @@ class CRF(nn.Module):
         self.start_transitions = nn.Parameter(torch.rand(num_tags))  # rand --> empty
         self.end_transitions = nn.Parameter(torch.rand(num_tags))
         if init_transitions:
-            logging.info('注意: 初始化转移矩阵目前只适用于BIO体系...')
-            self.transitions = self._build_transition_matrix((num_tags-1)//2)
+            logging.info(' *** 开始初始化转移矩阵 *** ')
+            logging.info('  注意: 目前只适用于BIO体系  ')
+            self.transitions = nn.Parameter(self._build_transition_matrix((num_tags-1)//2))
         else:
             self.transitions = nn.Parameter(torch.rand(num_tags, num_tags))
 
-        self.reset_parameters()
+        self.reset_parameters(init_transitions)
 
-    def reset_parameters(self) -> None:
+    def reset_parameters(self, init_transitions) -> None:
         """Initialize the transition parameters.
         The parameters will be initialized randomly from a uniform distribution
         between -0.1 and 0.1.
         """
         nn.init.uniform_(self.start_transitions, -0.1, 0.1)
         nn.init.uniform_(self.end_transitions, -0.1, 0.1)
-        nn.init.uniform_(self.transitions, -0.1, 0.1)
+        if not init_transitions:
+            nn.init.uniform_(self.transitions, -0.1, 0.1)
 
     def __repr__(self) -> str:
         return f'{self.__class__.__name__}(num_tags={self.num_tags})'
@@ -437,7 +439,7 @@ class CRF(nn.Module):
         ret.append([0] * (num_labels + 1) + [float("-inf")] * (num_labels))
         for i in range(num_labels):
             ret.append([0] * (num_labels + 1) + [float("-inf")] * i + [0] + [float("-inf")] * (num_labels - i - 1))
-        return np.array(ret).astype('float32')
+        return torch.from_numpy(np.array(ret).astype('float32'))
 
 
 # crf = CRF(3, True)
