@@ -343,7 +343,7 @@ def evaluate(args, model, tokenizer, prefix=""):
             preds = np.squeeze(preds)
     else:
         preds = np.array(list(map(lambda x: list(map(lambda y: 1 if y >= args.multi_label_threshold else 0, x)), preds)))
-    result = compute_metrics(preds, annos, args.labels, args.output_mode, args.multi_label)
+    result = compute_metrics(preds, annos, args.labels, args.output_mode, args.multi_label, args.multi_label_loss)
     results.update(result)
 
     output_eval_file = os.path.join(args.output_dir, prefix, "eval_results.txt")
@@ -397,6 +397,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False):
             tokenizer,
             output_mode,
             multi_label=args.multi_label,
+            multi_label_loss=args.multi_label_loss,
             max_length=args.max_seq_length,
             pad_on_left=bool(args.model_type in ["xlnet"]),  # pad on the left for xlnet
             pad_token=tokenizer.convert_tokens_to_ids([tokenizer.pad_token])[0],
@@ -414,7 +415,10 @@ def load_and_cache_examples(args, tokenizer, evaluate=False):
     all_attention_mask = torch.tensor([f.attention_mask for f in features], dtype=torch.long)
     all_token_type_ids = torch.tensor([f.token_type_ids for f in features], dtype=torch.long)
     if args.multi_label:  # 由于MultiLabelSoftMarginLoss的使用，label必须为float形式
-        all_labels = torch.tensor([f.label for f in features], dtype=torch.float)
+        if args.multi_label_loss == "MultiLabelSoftMarginLoss":
+            all_labels = torch.tensor([f.label for f in features], dtype=torch.float)
+        elif args.multi_label_loss == "MultiLabelMarginLoss":
+            all_labels = torch.tensor([f.label for f in features], dtype=torch.long)
     else:
         if output_mode == "classification":
             all_labels = torch.tensor([f.label for f in features], dtype=torch.long)
@@ -570,6 +574,13 @@ def main():
         type=float,
         default=0.5,
         help="Set threshold for multi-label task.",
+        )
+    parser.add_argument(
+        "--multi_label_loss",
+        type=str,
+        default="MultiLabelSoftMarginLoss",
+        choices=["MultiLabelSoftMarginLoss", "MultiLabelMarginLoss"],
+        help="Loss function for multi-label task.",
         )
     parser.add_argument("--train_data_number", type=int, default=-1,
                         help="The number of data sampled from training set, default fetch all. ")

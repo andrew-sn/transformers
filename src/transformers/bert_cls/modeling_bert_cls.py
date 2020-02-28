@@ -22,7 +22,7 @@ import os
 
 import torch
 from torch import nn
-from torch.nn import CrossEntropyLoss, MSELoss, MultiLabelSoftMarginLoss
+from torch.nn import CrossEntropyLoss, MSELoss, MultiLabelSoftMarginLoss, MultiLabelMarginLoss
 
 from ..activations import gelu, gelu_new, swish
 from ..configuration_bert import BertConfig
@@ -1109,6 +1109,7 @@ class BertClsForSequenceClassification(BertPreTrainedModel):
         super().__init__(config)
         self.num_labels = config.num_labels
         self.multi_label = config.multi_label
+        self.multi_label_loss = config.multi_label_loss
 
         self.bert = BertModel(config)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
@@ -1195,7 +1196,10 @@ class BertClsForSequenceClassification(BertPreTrainedModel):
 
         if labels is not None:
             if self.multi_label:
-                loss_fct = MultiLabelSoftMarginLoss()
+                if self.multi_label_loss == "MultiLabelSoftMarginLoss":
+                    loss_fct = MultiLabelSoftMarginLoss()
+                else:
+                    loss_fct = MultiLabelMarginLoss()
                 loss = loss_fct(logits.view(-1, self.num_labels), labels)  # [B, C] + [B, C]
             else:
                 if self.num_labels == 1:
