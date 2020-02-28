@@ -1,5 +1,9 @@
 ## BERT_CLS
 
+### 最佳实践
+
+* 对于多标签分类任务，当预测结果非常稀疏时，建议开启`--multi_label_loss=MultiLabelMarginLoss`
+
 ### 基本概念
 
 * 多类分类`Multiclass classification`，即类别之间互斥，`二分类`是其特例
@@ -43,7 +47,7 @@
   --logging_steps 50
   ```
 
-* `multilabel&classification train&eval`
+* `multilabel&classification&MultiLabelMarginLoss train&eval`
 
   ```shell
   export CUDA_VISIBLE_DEVICES=0
@@ -71,7 +75,8 @@
   --overwrite_output_dir \
   --multilabel \
   --train_data_number 10000 \
-  --logging_steps 50
+  --logging_steps 50 \
+  --multi_label_loss=MultiLabelMarginLoss
   ```
 
 
@@ -110,3 +115,20 @@
 ### 测试实验结果
 
 `export DATA_DIR=/data/home/liusunan/eigen/liusunan_projects/car_part/experiments/0227/multilabel_dat`
+
+* `multilabel&classification&MultiLabelMarginLoss train&eval`
+
+  ```python
+  2020-02-28 22:41:05,884 : INFO : ***** Eval results  *****
+  2020-02-28 22:41:05,884 : INFO :   F1_macro = 0.37
+  2020-02-28 22:41:05,884 : INFO :   F1_micro = 0.5
+  2020-02-28 22:41:05,884 : INFO :   P_macro = 0.05
+  2020-02-28 22:41:05,884 : INFO :   P_micro = 0.5
+  2020-02-28 22:41:05,884 : INFO :   R_macro = 0.37
+  2020-02-28 22:41:05,884 : INFO :   R_micro = 0.5
+  ```
+
+* 结论：
+
+  * 开启`--multi_label_loss=MultiLabelMarginLoss`，能解决多标签问题的稀疏问题
+

@@ -21,7 +21,7 @@ import os
 import json
 
 from json import JSONDecodeError
-
+import pandas as pd
 from random import sample
 import numpy as np
 from sklearn.metrics import mean_squared_error, mean_absolute_error, precision_score, recall_score, f1_score, \
@@ -76,16 +76,27 @@ def read_examples_from_file(data_dir, mode, train_data_number=-1):
     return examples
 
 
-def form_multi_label(label, label_list):
+def form_multi_label(label, label_list, multi_label_loss):
     if not isinstance(label, list):
         raise ValueError("在multi-label模式下，训练数据中的label字段必须为list...")
-    ret = [0] * len(label_list)
-    for l in label:
-        index = label_list.index(l)
-        if index == -1:
-            raise ValueError("训练数据中出现了不在规范类别中的类别: {}".format(l))
-        ret[index] = 1
-    return ret
+    if multi_label_loss == "MultiLabelSoftMarginLoss":
+        ret = [0] * len(label_list)
+        for l in label:
+            index = label_list.index(l)
+            if index == -1:
+                raise ValueError("训练数据中出现了不在规范类别中的类别: {}".format(l))
+            ret[index] = 1
+        return ret
+    elif multi_label_loss == "MultiLabelMarginLoss":
+        ret = []
+        for l in label:
+            index = label_list.index(l)
+            if index == -1:
+                raise ValueError("训练数据中出现了不在规范类别中的类别: {}".format(l))
+            ret.append(index)
+        # padding with -1
+        ret += [-1] * (len(label_list) - len(label))
+        return ret
 
 
 def convert_examples_to_features(
@@ -94,6 +105,7 @@ def convert_examples_to_features(
     tokenizer,
     output_mode,
     multi_label=False,
+    multi_label_loss=None,
     max_length=512,
     pad_on_left=False,
     pad_token=0,
@@ -109,6 +121,7 @@ def convert_examples_to_features(
         tokenizer: Instance of a tokenizer that will tokenize the examples
         output_mode: Whether the model is classification or regression
         multi_label: Whether the task is MultiLabel or MultiClass(default)
+        multi_label_loss: The loss function chosen for multi-label
         max_length: Maximum example length
         pad_on_left: If set to ``True``, the examples will be padded on the left rather than on the right (default)
         pad_token: Padding token
@@ -164,7 +177,7 @@ def convert_examples_to_features(
             else:
                 raise KeyError(output_mode)
         else:
-            label = form_multi_label(example.label, label_list)
+            label = form_multi_label(example.label, label_list, multi_label_loss)
 
         if ex_index < 5:
             logger.info("*** Example ***")
@@ -248,8 +261,27 @@ def classification_metrics(preds, annos, labels):
             "F1_micro": f1_score_micro, "F1_macro": f1_score_macro}
 
 
-def multi_label_metrics(preds, annos, labels):
+def filter_nan(arr):
+    arr = np.array(arr)
+    return np.array(arr[~pd.isnull(arr)])
+
+
+def transform_annos_when_multilabelmarginloss(annos, label_list):
+    ret = []
+    for a in annos:
+        index = 0
+        _ret = [0] * len(label_list)
+        while a[index] != -1:
+            _ret[a[index]] = 1
+            index += 1
+        ret.append(_ret)
+    return np.array(ret)
+
+
+def multi_label_metrics(preds, annos, labels, multi_label_loss):
     label_list = get_labels(labels)
+    if multi_label_loss == "MultiLabelMarginLoss":
+        annos = transform_annos_when_multilabelmarginloss(annos, label_list)
     labels_matrix = {}
     confusion_matrix = multilabel_confusion_matrix(annos, preds)
     p_list = []
@@ -270,6 +302,14 @@ def multi_label_metrics(preds, annos, labels):
         fp_list.append(fp)
         fn_list.append(fn)
         labels_matrix[l] = {"precision": p, "recall": r, "F1": f1}
+    # filter nan
+    # TODO... 代码需要美化
+    p_list = filter_nan(p_list)
+    r_list = filter_nan(r_list)
+    f1_list = filter_nan(r_list)
+    tp_list = filter_nan(r_list)
+    fp_list = filter_nan(r_list)
+    fn_list = filter_nan(r_list)
     p_macro = round(np.sum(p_list)/len(label_list), 2)
     r_macro = round(np.sum(r_list)/len(label_list), 2)
     f1_macro = round(np.sum(f1_list)/len(label_list), 2)
@@ -300,9 +340,9 @@ def multi_label_metrics(preds, annos, labels):
             "F1_micro": f1_micro, "F1_macro": f1_macro}
 
 
-def compute_metrics(preds, annos, labels, output_mode, multi_label=False):
+def compute_metrics(preds, annos, labels, output_mode, multi_label=False, multi_label_loss=None):
     if multi_label:
-        return multi_label_metrics(preds, annos, labels)
+        return multi_label_metrics(preds, annos, labels, multi_label_loss)
     else:  # multi_class
         if output_mode == "regression":
             return regressio_metrics(preds, annos)
