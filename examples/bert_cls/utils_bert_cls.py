@@ -21,7 +21,12 @@ import os
 import json
 
 from json import JSONDecodeError
-from sklearn.metrics import mean_squared_error, mean_absolute_error, precision_score, recall_score, f1_score
+
+from random import sample
+import numpy as np
+from sklearn.metrics import mean_squared_error, mean_absolute_error, precision_score, recall_score, f1_score, \
+    multilabel_confusion_matrix
+
 
 logger = logging.getLogger(__name__)
 
@@ -61,11 +66,26 @@ def transform(e):
     return InputExample(guid=e["index"], text_a=e["text_a"], text_b=e.get("text_b", None), label=e["label"])
 
 
-def read_examples_from_file(data_dir, mode):
+def read_examples_from_file(data_dir, mode, train_data_number=-1):
     file_path = os.path.join(data_dir, "{}.json".format(mode))
-    examples = json.load(open(file_path, 'r'))
+    if mode == "train" and train_data_number > 0:
+        examples = sample(json.load(open(file_path, 'r')), train_data_number)
+    else:
+        examples = json.load(open(file_path, 'r'))
     examples = list(map(lambda e: transform(e), examples))
     return examples
+
+
+def form_multi_label(label, label_list):
+    if not isinstance(label, list):
+        raise ValueError("在multi-label模式下，训练数据中的label字段必须为list...")
+    ret = [0] * len(label_list)
+    for l in label:
+        index = label_list.index(l)
+        if index == -1:
+            raise ValueError("训练数据中出现了不在规范类别中的类别: {}".format(l))
+        ret[index] = 1
+    return ret
 
 
 def convert_examples_to_features(
@@ -73,6 +93,7 @@ def convert_examples_to_features(
     label_list,
     tokenizer,
     output_mode,
+    multi_label=False,
     max_length=512,
     pad_on_left=False,
     pad_token=0,
@@ -86,6 +107,8 @@ def convert_examples_to_features(
         examples: List of ``InputExamples`` or ``tf.data.Dataset`` containing the examples.
         label_list: List of ``labels``.
         tokenizer: Instance of a tokenizer that will tokenize the examples
+        output_mode: Whether the model is classification or regression
+        multi_label: Whether the task is MultiLabel or MultiClass(default)
         max_length: Maximum example length
         pad_on_left: If set to ``True``, the examples will be padded on the left rather than on the right (default)
         pad_token: Padding token
@@ -133,12 +156,15 @@ def convert_examples_to_features(
             len(token_type_ids), max_length
             )
 
-        if output_mode == "classification":
-            label = label_map[example.label]
-        elif output_mode == "regression":
-            label = float(example.label)
+        if not multi_label:
+            if output_mode == "classification":
+                label = label_map[example.label]
+            elif output_mode == "regression":
+                label = float(example.label)
+            else:
+                raise KeyError(output_mode)
         else:
-            raise KeyError(output_mode)
+            label = form_multi_label(example.label, label_list)
 
         if ex_index < 5:
             logger.info("*** Example ***")
@@ -146,7 +172,7 @@ def convert_examples_to_features(
             logger.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
             logger.info("attention_mask: %s" % " ".join([str(x) for x in attention_mask]))
             logger.info("token_type_ids: %s" % " ".join([str(x) for x in token_type_ids]))
-            logger.info("label: %s (id = %d)" % (example.label, label))
+            logger.info("label: {} (id = {})".format(example.label, label))
 
         features.append(
             InputFeatures(
@@ -222,8 +248,63 @@ def classification_metrics(preds, annos, labels):
             "F1_micro": f1_score_micro, "F1_macro": f1_score_macro}
 
 
-def compute_metrics(preds, annos, labels, output_mode):
-    if output_mode == "regression":
-        return regressio_metrics(preds, annos)
-    elif output_mode == "classification":
-        return classification_metrics(preds, annos, labels)
+def multi_label_metrics(preds, annos, labels):
+    label_list = get_labels(labels)
+    labels_matrix = {}
+    confusion_matrix = multilabel_confusion_matrix(annos, preds)
+    p_list = []
+    r_list = []
+    f1_list = []
+    tp_list = []
+    fp_list = []
+    fn_list = []
+    for index, l in enumerate(label_list):
+        tn, fp, fn, tp = confusion_matrix[index].ravel()
+        p = round(tp/(tp+fp), 2)
+        r = round(tp/(tp+fn), 2)
+        f1 = round(2*p*r/(p+r), 2)
+        p_list.append(p)
+        r_list.append(r)
+        f1_list.append(f1)
+        tp_list.append(tp)
+        fp_list.append(fp)
+        fn_list.append(fn)
+        labels_matrix[l] = {"precision": p, "recall": r, "F1": f1}
+    p_macro = round(np.sum(p_list)/len(label_list), 2)
+    r_macro = round(np.sum(r_list)/len(label_list), 2)
+    f1_macro = round(np.sum(f1_list)/len(label_list), 2)
+    tp_sum = np.sum(tp_list)
+    fp_sum = np.sum(fp_list)
+    fn_sum = np.sum(fn_list)
+    p_micro = round(tp_sum/(tp_sum+fp_sum), 2)
+    r_micro = round(tp_sum/(tp_sum+fn_sum), 2)
+    f1_micro = round(2*p_micro*r_micro/(p_micro+r_micro), 2)
+    # format-output
+    logger.info("***** MultiLabel Classification Metrics *****")
+    logger.info("  P(Precision)_micro = {}  ".format(p_micro))
+    logger.info("  P(Precision)_macro = {}  ".format(p_macro))
+    for index, label in enumerate(label_list):
+        logger.info("  P_{} = {}  ".format(label, labels_matrix[label]["precision"]))
+    logger.info("  R(Recall)_micro = {}  ".format(r_micro))
+    logger.info("  R(Recall)_macro = {}  ".format(r_macro))
+    for index, label in enumerate(label_list):
+        logger.info("  R_{} = {}  ".format(label, labels_matrix[label]["recall"]))
+    logger.info("  F1_micro = {}  ".format(f1_micro))
+    logger.info("  F1_macro = {}  ".format(f1_macro))
+    for index, label in enumerate(label_list):
+        logger.info("  F1_{} = {}  ".format(label, labels_matrix[label]["F1"]))
+        logger.info("  Precision_{} = {}  ".format(label, labels_matrix[label]["precision"]))
+        logger.info("  Recall_{} = {}  ".format(label, labels_matrix[label]["recall"]))
+    return {"P_micro": p_micro, "P_macro": p_macro,
+            "R_micro": r_micro, "R_macro": r_macro,
+            "F1_micro": f1_micro, "F1_macro": f1_macro}
+
+
+def compute_metrics(preds, annos, labels, output_mode, multi_label=False):
+    if multi_label:
+        return multi_label_metrics(preds, annos, labels)
+    else:  # multi_class
+        if output_mode == "regression":
+            return regressio_metrics(preds, annos)
+        elif output_mode == "classification":
+            return classification_metrics(preds, annos, labels)

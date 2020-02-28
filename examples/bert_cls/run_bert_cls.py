@@ -36,7 +36,8 @@ from transformers import (
     AlbertForSequenceClassification,
     AlbertTokenizer,
     BertConfig,
-    BertForSequenceClassification,
+    BertClsConfig,
+    BertClsForSequenceClassification,
     BertTokenizer,
     DistilBertConfig,
     DistilBertForSequenceClassification,
@@ -72,7 +73,7 @@ ALL_MODELS = sum(
     (
         tuple(conf.pretrained_config_archive_map.keys())
         for conf in (
-            BertConfig,
+            BertClsConfig,
             XLNetConfig,
             XLMConfig,
             RobertaConfig,
@@ -86,7 +87,7 @@ ALL_MODELS = sum(
 )
 
 MODEL_CLASSES = {
-    "bert": (BertConfig, BertForSequenceClassification, BertTokenizer),
+    "bert": (BertClsConfig, BertClsForSequenceClassification, BertTokenizer),
     "xlnet": (XLNetConfig, XLNetForSequenceClassification, XLNetTokenizer),
     "xlm": (XLMConfig, XLMForSequenceClassification, XLMTokenizer),
     "roberta": (RobertaConfig, RobertaForSequenceClassification, RobertaTokenizer),
@@ -335,11 +336,14 @@ def evaluate(args, model, tokenizer, prefix=""):
             annos = np.append(annos, inputs["labels"].detach().cpu().numpy(), axis=0)
 
     results = {"eval_loss": eval_loss / nb_eval_steps}
-    if args.output_mode == "classification":
-        preds = np.argmax(preds, axis=1)
-    elif args.output_mode == "regression":
-        preds = np.squeeze(preds)
-    result = compute_metrics(preds, annos, args.labels, args.output_mode)
+    if not args.multi_label:
+        if args.output_mode == "classification":
+            preds = np.argmax(preds, axis=1)
+        elif args.output_mode == "regression":
+            preds = np.squeeze(preds)
+    else:
+        preds = np.array(list(map(lambda x: list(map(lambda y: 1 if y >= args.multi_label_threshold else 0, x)), preds)))
+    result = compute_metrics(preds, annos, args.labels, args.output_mode, args.multi_label)
     results.update(result)
 
     output_eval_file = os.path.join(args.output_dir, prefix, "eval_results.txt")
@@ -358,27 +362,41 @@ def load_and_cache_examples(args, tokenizer, evaluate=False):
 
     output_mode = args.output_mode
     # Load data features from cache or dataset file
-    cached_features_file = os.path.join(
-        args.data_dir,
-        "cached_{}_{}_{}".format(
-            "dev" if evaluate else "train",
-            list(filter(None, args.model_name_or_path.split("/"))).pop(),
-            str(args.max_seq_length),
-        ),
-    )
+    if args.train_data_number > 0:
+        cached_features_file = os.path.join(
+            args.data_dir,
+            "cached_{}_{}_{}_{}_{}".format(
+                "dev" if evaluate else "train",
+                list(filter(None, args.model_name_or_path.split("/"))).pop(),
+                str(args.seed),
+                str(args.max_seq_length),
+                str(args.train_data_number)
+                ),
+            )
+    else:
+        cached_features_file = os.path.join(
+            args.data_dir,
+            "cached_{}_{}_{}_{}".format(
+                "dev" if evaluate else "train",
+                list(filter(None, args.model_name_or_path.split("/"))).pop(),
+                str(args.seed),
+                str(args.max_seq_length)
+                ),
+            )
     if os.path.exists(cached_features_file) and not args.overwrite_cache:
         logger.info("Loading features from cached file %s", cached_features_file)
         features = torch.load(cached_features_file)
     else:
         logger.info("Creating features from dataset file at %s", args.data_dir)
         label_list = get_labels(args.labels)
-        examples = read_examples_from_file(args.data_dir, "dev" if evaluate else "train")
+        examples = read_examples_from_file(args.data_dir, "dev" if evaluate else "train", args.train_data_number)
 
         features = convert_examples_to_features(
             examples,
             label_list,
             tokenizer,
             output_mode,
+            multi_label=args.multi_label,
             max_length=args.max_seq_length,
             pad_on_left=bool(args.model_type in ["xlnet"]),  # pad on the left for xlnet
             pad_token=tokenizer.convert_tokens_to_ids([tokenizer.pad_token])[0],
@@ -395,10 +413,13 @@ def load_and_cache_examples(args, tokenizer, evaluate=False):
     all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
     all_attention_mask = torch.tensor([f.attention_mask for f in features], dtype=torch.long)
     all_token_type_ids = torch.tensor([f.token_type_ids for f in features], dtype=torch.long)
-    if output_mode == "classification":
-        all_labels = torch.tensor([f.label for f in features], dtype=torch.long)
-    elif output_mode == "regression":
+    if args.multi_label:  # 由于MultiLabelSoftMarginLoss的使用，label必须为float形式
         all_labels = torch.tensor([f.label for f in features], dtype=torch.float)
+    else:
+        if output_mode == "classification":
+            all_labels = torch.tensor([f.label for f in features], dtype=torch.long)
+        elif output_mode == "regression":
+            all_labels = torch.tensor([f.label for f in features], dtype=torch.float)
 
     dataset = TensorDataset(all_input_ids, all_attention_mask, all_token_type_ids, all_labels)
     return dataset
@@ -539,6 +560,26 @@ def main():
         type=str,
         help="Path to a file containing all labels.",
         )
+    parser.add_argument(
+        "--multi_label",
+        action="store_true",
+        help="Whether the task is multi_label.",
+        )
+    parser.add_argument(
+        "--multi_label_threshold",
+        type=float,
+        default=0.5,
+        help="Set threshold for multi-label task.",
+        )
+    parser.add_argument("--train_data_number", type=int, default=-1,
+                        help="The number of data sampled from training set, default fetch all. ")
+    # TODO...当预测的标签过于稀疏时，模型会很投机地将所有类别都预测为0，导致训练时loss能收敛，但当预测时无输出标签；可以考虑对每个样本的标签做MASK
+    parser.add_argument(
+        "--mask_label",
+        action="store_true",
+        help="Whether to put mask on labels to compute the loss.",
+        )
+
     args = parser.parse_args()
 
     if (
@@ -607,6 +648,7 @@ def main():
         args.config_name if args.config_name else args.model_name_or_path,
         num_labels=num_labels,
         cache_dir=args.cache_dir if args.cache_dir else None,
+        multi_label=args.multi_label
     )
     tokenizer = tokenizer_class.from_pretrained(
         args.tokenizer_name if args.tokenizer_name else args.model_name_or_path,

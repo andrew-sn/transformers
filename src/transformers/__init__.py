@@ -168,6 +168,10 @@ if is_torch_available():
         f1_score,
         classification_report
         )
+    from .bert_cls import (
+        BertClsForSequenceClassification,
+        BertClsConfig,
+        )
     from .modeling_openai import (
         OpenAIGPTPreTrainedModel,
         OpenAIGPTModel,

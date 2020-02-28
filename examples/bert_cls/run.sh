@@ -1,10 +1,10 @@
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=0
 export MAX_LENGTH=256
 export BERT_MODEL=bert-base-chinese
-export BATCH_SIZE=8
+export BATCH_SIZE=16
 export NUM_EPOCHS=3
 export SAVE_STEPS=750
-export SEED=1
+export SEED=0
 export DATA_DIR=PATH_TO_DATA
 
 python3 run_bert_cls.py --data_dir $DATA_DIR \
@@ -20,4 +20,6 @@ python3 run_bert_cls.py --data_dir $DATA_DIR \
 --seed $SEED \
 --do_train \
 --do_eval \
---overwrite_output_dir
+--overwrite_output_dir \
+--train_data_number 10000 \
+--logging_steps 50
