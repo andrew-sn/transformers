@@ -161,6 +161,8 @@ class BertClsConfig(PretrainedConfig):
 
         if "multi_label" in kwargs:
             config_dict["multi_label"] = kwargs["multi_label"]
+        if "multi_label_loss" in kwargs:
+            config_dict["multi_label_loss"] = kwargs["multi_label_loss"]
         config = cls(**config_dict)
 
         if hasattr(config, "pruned_heads"):
