@@ -659,7 +659,8 @@ def main():
         args.config_name if args.config_name else args.model_name_or_path,
         num_labels=num_labels,
         cache_dir=args.cache_dir if args.cache_dir else None,
-        multi_label=args.multi_label
+        multi_label=args.multi_label,
+        multi_label_loss=args.multi_label_loss
     )
     tokenizer = tokenizer_class.from_pretrained(
         args.tokenizer_name if args.tokenizer_name else args.model_name_or_path,

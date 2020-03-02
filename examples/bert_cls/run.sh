@@ -21,5 +21,8 @@ python3 run_bert_cls.py --data_dir $DATA_DIR \
 --do_train \
 --do_eval \
 --overwrite_output_dir \
+--multi_label \
 --train_data_number 10000 \
---logging_steps 50
+--logging_steps 50 \
+--multi_label_loss MultiLabelMarginLoss \
+--evaluate_during_training

@@ -44,7 +44,8 @@
   --do_eval \
   --overwrite_output_dir \
   --train_data_number 10000 \
-  --logging_steps 50
+  --logging_steps 50 \
+  --evaluate_during_training
   ```
 
 * `multilabel&classification&MultiLabelMarginLoss train&eval`
@@ -73,10 +74,11 @@
   --do_train \
   --do_eval \
   --overwrite_output_dir \
-  --multilabel \
+  --multi_label \
   --train_data_number 10000 \
   --logging_steps 50 \
-  --multi_label_loss=MultiLabelMarginLoss
+  --multi_label_loss=MultiLabelMarginLoss \
+  ----evaluate_during_training
   ```
 
 
@@ -118,17 +120,18 @@
 
 * `multilabel&classification&MultiLabelMarginLoss train&eval`
 
-  ```python
-  2020-02-28 22:41:05,884 : INFO : ***** Eval results  *****
-  2020-02-28 22:41:05,884 : INFO :   F1_macro = 0.37
-  2020-02-28 22:41:05,884 : INFO :   F1_micro = 0.5
-  2020-02-28 22:41:05,884 : INFO :   P_macro = 0.05
-  2020-02-28 22:41:05,884 : INFO :   P_micro = 0.5
-  2020-02-28 22:41:05,884 : INFO :   R_macro = 0.37
-  2020-02-28 22:41:05,884 : INFO :   R_micro = 0.5
-  ```
-
+  ```shell
+2020-03-02 13:25:41,056 : INFO : ***** Eval results  *****
+2020-03-02 13:25:41,056 : INFO :   F1_macro = 0.47
+2020-03-02 13:25:41,056 : INFO :   F1_micro = 0.72
+2020-03-02 13:25:41,056 : INFO :   P_macro = 0.42
+2020-03-02 13:25:41,056 : INFO :   P_micro = 0.59
+2020-03-02 13:25:41,056 : INFO :   R_macro = 0.6
+2020-03-02 13:25:41,056 : INFO :   R_micro = 0.93
+```
+  
 * 结论：
 
-  * 开启`--multi_label_loss=MultiLabelMarginLoss`，能解决多标签问题的稀疏问题
+  * 开启`--multi_label_loss=MultiLabelMarginLoss`，能解决多标签问题的稀疏问题；
+  * 相比于`multi-class`在测试集上`max(F1-micro)=0.85`，在此任务上`multi-label`的`max(F1-micro)=0.73`，后者效果略差；
 
