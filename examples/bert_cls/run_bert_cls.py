@@ -291,7 +291,7 @@ def train(args, train_dataset, model, tokenizer):
 
 def evaluate(args, model, tokenizer, prefix=""):
 
-    eval_dataset = load_and_cache_examples(args, tokenizer, evaluate=True)
+    eval_dataset = load_and_cache_examples(args, tokenizer, mode="dev")
 
     if not os.path.exists(args.output_dir) and args.local_rank in [-1, 0]:
         os.makedirs(args.output_dir)
@@ -356,8 +356,69 @@ def evaluate(args, model, tokenizer, prefix=""):
     return results
 
 
-def load_and_cache_examples(args, tokenizer, evaluate=False):
-    if args.local_rank not in [-1, 0] and not evaluate:
+def test(args, model, tokenizer, prefix=""):
+
+    eval_dataset = load_and_cache_examples(args, tokenizer, mode="test")
+
+    if not os.path.exists(args.output_dir) and args.local_rank in [-1, 0]:
+        os.makedirs(args.output_dir)
+
+    args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
+    # Note that DistributedSampler samples randomly
+    eval_sampler = SequentialSampler(eval_dataset)
+    eval_dataloader = DataLoader(eval_dataset, sampler=eval_sampler, batch_size=args.eval_batch_size)
+
+    # multi-gpu eval
+    if args.n_gpu > 1 and not isinstance(model, torch.nn.DataParallel):
+        model = torch.nn.DataParallel(model)
+
+    # Eval!
+    logger.info("***** Running evaluation {} *****".format(prefix))
+    logger.info("  Num examples = %d", len(eval_dataset))
+    logger.info("  Batch size = %d", args.eval_batch_size)
+    eval_loss = 0.0
+    nb_eval_steps = 0
+    preds = None
+    annos = None
+    for batch in tqdm(eval_dataloader, desc="Evaluating"):
+        model.eval()
+        batch = tuple(t.to(args.device) for t in batch)
+
+        with torch.no_grad():
+            inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[3]}
+            if args.model_type != "distilbert":
+                inputs["token_type_ids"] = (
+                    batch[2] if args.model_type in ["bert", "xlnet", "albert"] else None
+                )  # XLM, DistilBERT, RoBERTa, and XLM-RoBERTa don't use segment_ids
+            outputs = model(**inputs)
+            tmp_eval_loss, logits = outputs[:2]
+
+            eval_loss += tmp_eval_loss.mean().item()
+        nb_eval_steps += 1
+        if preds is None:
+            preds = logits.detach().cpu().numpy()
+            annos = inputs["labels"].detach().cpu().numpy()
+        else:
+            preds = np.append(preds, logits.detach().cpu().numpy(), axis=0)
+            annos = np.append(annos, inputs["labels"].detach().cpu().numpy(), axis=0)
+
+    if args.test_output == "probability":
+        pass
+    else:
+        if not args.multi_label:
+            if args.output_mode == "classification":
+                preds = np.argmax(preds, axis=1)
+            elif args.output_mode == "regression":
+                preds = np.squeeze(preds)
+        else:
+            preds = np.array(list(map(lambda x: list(map(lambda y: 1 if y >= args.multi_label_threshold else 0, x)), preds)))
+    output_file = os.path.join(args.data_dir, "predict.json")
+    json.dump(preds.tolist(), open(output_file, "w"))
+    return
+
+
+def load_and_cache_examples(args, tokenizer, mode="train"):
+    if args.local_rank not in [-1, 0] and mode == "train":
         torch.distributed.barrier()  # Make sure only the first process in distributed training process the dataset, and the others will use the cache
 
     output_mode = args.output_mode
@@ -366,7 +427,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False):
         cached_features_file = os.path.join(
             args.data_dir,
             "cached_{}_{}_{}_{}_{}".format(
-                "dev" if evaluate else "train",
+                mode,
                 list(filter(None, args.model_name_or_path.split("/"))).pop(),
                 str(args.seed),
                 str(args.max_seq_length),
@@ -377,7 +438,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False):
         cached_features_file = os.path.join(
             args.data_dir,
             "cached_{}_{}_{}_{}".format(
-                "dev" if evaluate else "train",
+                mode,
                 list(filter(None, args.model_name_or_path.split("/"))).pop(),
                 str(args.seed),
                 str(args.max_seq_length)
@@ -389,7 +450,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False):
     else:
         logger.info("Creating features from dataset file at %s", args.data_dir)
         label_list = get_labels(args.labels)
-        examples = read_examples_from_file(args.data_dir, "dev" if evaluate else "train", args.train_data_number)
+        examples = read_examples_from_file(args.data_dir, mode, args.train_data_number)
 
         features = convert_examples_to_features(
             examples,
@@ -407,7 +468,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False):
             logger.info("Saving features into cached file %s", cached_features_file)
             torch.save(features, cached_features_file)
 
-    if args.local_rank == 0 and not evaluate:
+    if args.local_rank == 0 and mode == "train":
         torch.distributed.barrier()  # Make sure only the first process in distributed training process the dataset, and the others will use the cache
 
     # Convert to Tensors and build dataset
@@ -487,6 +548,7 @@ def main():
     )
     parser.add_argument("--do_train", action="store_true", help="Whether to run training.")
     parser.add_argument("--do_eval", action="store_true", help="Whether to run eval on the dev set.")
+    parser.add_argument("--do_test", action="store_true", help="Whether to run predict on the test set.")
     parser.add_argument(
         "--evaluate_during_training", action="store_true", help="Run evaluation during training at each logging step.",
     )
@@ -590,7 +652,13 @@ def main():
         action="store_true",
         help="Whether to put mask on labels to compute the loss.",
         )
-
+    parser.add_argument(
+        "--test_output",
+        type=str,
+        default="label",
+        choices=["label", "probability"],
+        help="Whether to output label or probability.",
+        )
     args = parser.parse_args()
 
     if (
@@ -683,7 +751,7 @@ def main():
 
     # Training
     if args.do_train:
-        train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False)
+        train_dataset = load_and_cache_examples(args, tokenizer, mode="train")
         global_step, tr_loss = train(args, train_dataset, model, tokenizer)
         logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
@@ -730,6 +798,17 @@ def main():
             result = evaluate(args, model, tokenizer, prefix=prefix)
             result = dict((k + "_{}".format(global_step), v) for k, v in result.items())
             results.update(result)
+
+    if args.do_test and args.local_rank in [-1, 0]:
+        tokenizer = tokenizer_class.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
+        checkpoint = args.output_dir
+        logger.info("Evaluate the following checkpoints: %s", checkpoint)
+        prefix = checkpoint.split("/")[-1] if checkpoint.find("checkpoint") != -1 else ""
+
+        model = model_class.from_pretrained(checkpoint)
+        model.to(args.device)
+        test(args, model, tokenizer, prefix=prefix)
+        logging.info("完成预测...")
 
     return results
 
