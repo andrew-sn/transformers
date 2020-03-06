@@ -172,6 +172,10 @@ if is_torch_available():
         BertClsForSequenceClassification,
         BertClsConfig,
         )
+    from .bert_cls_with_cat import (
+        BertClsWithCatForSequenceClassification,
+        BertClsWithCatConfig
+        )
     from .modeling_openai import (
         OpenAIGPTPreTrainedModel,
         OpenAIGPTModel,
