@@ -112,7 +112,7 @@
   --logging_steps 100 \
   --evaluate_during_training \
   --category_hidden_size 100 \
---learning_rate 5e-5 \
+  --learning_rate 5e-5 \
   --multitask \
   --step
   ```
@@ -154,7 +154,7 @@
 ### 测试数据概况
 
 |       | 数据量 | 最大长度 |
-| ----- | ------ | -------- |
+| :-----: | :------: | :--------: |
 | train | 8747   | 40       |
 | dev   | 2002   | 38       |
 
