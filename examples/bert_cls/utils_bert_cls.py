@@ -24,8 +24,7 @@ from json import JSONDecodeError
 import pandas as pd
 from random import sample
 import numpy as np
-from sklearn.metrics import mean_squared_error, mean_absolute_error, precision_score, recall_score, f1_score, \
-    multilabel_confusion_matrix
+from sklearn.metrics import mean_squared_error, mean_absolute_error, precision_score, recall_score, f1_score
 
 
 logger = logging.getLogger(__name__)
@@ -283,6 +282,7 @@ def multi_label_metrics(preds, annos, labels, multi_label_loss):
     if multi_label_loss == "MultiLabelMarginLoss":
         annos = transform_annos_when_multilabelmarginloss(annos, label_list)
     labels_matrix = {}
+    from sklearn.metrics import multilabel_confusion_matrix
     confusion_matrix = multilabel_confusion_matrix(annos, preds)
     p_list = []
     r_list = []
