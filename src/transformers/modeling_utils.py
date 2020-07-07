@@ -13,15 +13,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""PyTorch BERT model."""
 
-
+import inspect
 import logging
 import os
-import typing
+from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
-from torch import nn
+from torch import Tensor, device, dtype, nn
 from torch.nn import CrossEntropyLoss
 from torch.nn import functional as F
 
@@ -36,9 +35,11 @@ from .file_utils import (
     hf_bucket_url,
     is_remote_url,
 )
+from .generation_utils import GenerationMixin
 
 
 logger = logging.getLogger(__name__)
+
 
 try:
     from torch.nn import Identity
@@ -55,6 +56,20 @@ except ImportError:
             return input
 
 
+def find_pruneable_heads_and_indices(
+    heads: List, n_heads: int, head_size: int, already_pruned_heads: set
+) -> Tuple[set, "torch.LongTensor"]:
+    mask = torch.ones(n_heads, head_size)
+    heads = set(heads) - already_pruned_heads  # Convert to set and remove already pruned heads
+    for head in heads:
+        # Compute how many pruned heads are before the head and move the index accordingly
+        head = head - sum(1 if h < head else 0 for h in already_pruned_heads)
+        mask[head] = 0
+    mask = mask.view(-1).contiguous().eq(1)
+    index: torch.LongTensor = torch.arange(len(mask))[mask].long()
+    return heads, index
+
+
 class ModuleUtilsMixin:
     """
     A few utilities for torch.nn.Modules, to be used as a mixin.
@@ -67,8 +82,187 @@ class ModuleUtilsMixin:
         params = filter(lambda x: x.requires_grad, self.parameters()) if only_trainable else self.parameters()
         return sum(p.numel() for p in params)
 
+    @staticmethod
+    def _hook_rss_memory_pre_forward(module, *args, **kwargs):
+        try:
+            import psutil
+        except (ImportError):
+            raise ImportError("You need to install psutil (pip install psutil) to use memory tracing.")
 
-class PreTrainedModel(nn.Module, ModuleUtilsMixin):
+        process = psutil.Process(os.getpid())
+        mem = process.memory_info()
+        module.mem_rss_pre_forward = mem.rss
+        return None
+
+    @staticmethod
+    def _hook_rss_memory_post_forward(module, *args, **kwargs):
+        try:
+            import psutil
+        except (ImportError):
+            raise ImportError("You need to install psutil (pip install psutil) to use memory tracing.")
+
+        process = psutil.Process(os.getpid())
+        mem = process.memory_info()
+        module.mem_rss_post_forward = mem.rss
+        mem_rss_diff = module.mem_rss_post_forward - module.mem_rss_pre_forward
+        module.mem_rss_diff = mem_rss_diff + (module.mem_rss_diff if hasattr(module, "mem_rss_diff") else 0)
+        return None
+
+    def add_memory_hooks(self):
+        """ Add a memory hook before and after each sub-module forward pass to record increase in memory consumption.
+            Increase in memory consumption is stored in a `mem_rss_diff` attribute for each module and can be reset to zero with `model.reset_memory_hooks_state()`
+        """
+        for module in self.modules():
+            module.register_forward_pre_hook(self._hook_rss_memory_pre_forward)
+            module.register_forward_hook(self._hook_rss_memory_post_forward)
+        self.reset_memory_hooks_state()
+
+    def reset_memory_hooks_state(self):
+        for module in self.modules():
+            module.mem_rss_diff = 0
+            module.mem_rss_post_forward = 0
+            module.mem_rss_pre_forward = 0
+
+    @property
+    def device(self) -> device:
+        """
+        Get torch.device from module, assuming that the whole module has one device.
+        """
+        try:
+            return next(self.parameters()).device
+        except StopIteration:
+            # For nn.DataParallel compatibility in PyTorch 1.5
+
+            def find_tensor_attributes(module: nn.Module) -> List[Tuple[str, Tensor]]:
+                tuples = [(k, v) for k, v in module.__dict__.items() if torch.is_tensor(v)]
+                return tuples
+
+            gen = self._named_members(get_members_fn=find_tensor_attributes)
+            first_tuple = next(gen)
+            return first_tuple[1].device
+
+    @property
+    def dtype(self) -> dtype:
+        """
+        Get torch.dtype from module, assuming that the whole module has one dtype.
+        """
+        try:
+            return next(self.parameters()).dtype
+        except StopIteration:
+            # For nn.DataParallel compatibility in PyTorch 1.5
+
+            def find_tensor_attributes(module: nn.Module) -> List[Tuple[str, Tensor]]:
+                tuples = [(k, v) for k, v in module.__dict__.items() if torch.is_tensor(v)]
+                return tuples
+
+            gen = self._named_members(get_members_fn=find_tensor_attributes)
+            first_tuple = next(gen)
+            return first_tuple[1].dtype
+
+    def invert_attention_mask(self, encoder_attention_mask: Tensor) -> Tensor:
+        """type: torch.Tensor -> torch.Tensor"""
+        if encoder_attention_mask.dim() == 3:
+            encoder_extended_attention_mask = encoder_attention_mask[:, None, :, :]
+        if encoder_attention_mask.dim() == 2:
+            encoder_extended_attention_mask = encoder_attention_mask[:, None, None, :]
+        # T5 has a mask that can compare sequence ids, we can simulate this here with this transposition
+        # Cf. https://github.com/tensorflow/mesh/blob/8d2465e9bc93129b913b5ccc6a59aa97abd96ec6/mesh_tensorflow
+        # /transformer/transformer_layers.py#L270
+        # encoder_extended_attention_mask = (encoder_extended_attention_mask ==
+        # encoder_extended_attention_mask.transpose(-1, -2))
+        encoder_extended_attention_mask = encoder_extended_attention_mask.to(dtype=self.dtype)  # fp16 compatibility
+
+        if self.dtype == torch.float16:
+            encoder_extended_attention_mask = (1.0 - encoder_extended_attention_mask) * -1e4
+        elif self.dtype == torch.float32:
+            encoder_extended_attention_mask = (1.0 - encoder_extended_attention_mask) * -1e9
+        else:
+            raise ValueError(
+                "{} not recognized. `dtype` should be set to either `torch.float32` or `torch.float16`".format(
+                    self.dtype
+                )
+            )
+
+        return encoder_extended_attention_mask
+
+    def get_extended_attention_mask(self, attention_mask: Tensor, input_shape: Tuple, device: device) -> Tensor:
+        """Makes broadcastable attention mask and causal mask so that future and maked tokens are ignored.
+
+        Arguments:
+            attention_mask: torch.Tensor with 1 indicating tokens to ATTEND to
+            input_shape: tuple, shape of input_ids
+            device: torch.Device, usually self.device
+
+        Returns:
+            torch.Tensor with dtype of attention_mask.dtype
+        """
+        # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
+        # ourselves in which case we just need to make it broadcastable to all heads.
+        if attention_mask.dim() == 3:
+            extended_attention_mask = attention_mask[:, None, :, :]
+        elif attention_mask.dim() == 2:
+            # Provided a padding mask of dimensions [batch_size, seq_length]
+            # - if the model is a decoder, apply a causal mask in addition to the padding mask
+            # - if the model is an encoder, make the mask broadcastable to [batch_size, num_heads, seq_length, seq_length]
+            if self.config.is_decoder:
+                batch_size, seq_length = input_shape
+                seq_ids = torch.arange(seq_length, device=device)
+                causal_mask = seq_ids[None, None, :].repeat(batch_size, seq_length, 1) <= seq_ids[None, :, None]
+                # causal and attention masks must have same type with pytorch version < 1.3
+                causal_mask = causal_mask.to(attention_mask.dtype)
+                extended_attention_mask = causal_mask[:, None, :, :] * attention_mask[:, None, None, :]
+            else:
+                extended_attention_mask = attention_mask[:, None, None, :]
+        else:
+            raise ValueError(
+                "Wrong shape for input_ids (shape {}) or attention_mask (shape {})".format(
+                    input_shape, attention_mask.shape
+                )
+            )
+
+        # Since attention_mask is 1.0 for positions we want to attend and 0.0 for
+        # masked positions, this operation will create a tensor which is 0.0 for
+        # positions we want to attend and -10000.0 for masked positions.
+        # Since we are adding it to the raw scores before the softmax, this is
+        # effectively the same as removing these entirely.
+        extended_attention_mask = extended_attention_mask.to(dtype=self.dtype)  # fp16 compatibility
+        extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
+        return extended_attention_mask
+
+    def get_head_mask(self, head_mask: Tensor, num_hidden_layers: int, is_attention_chunked: bool = False) -> Tensor:
+        """
+        # Prepare head mask if needed
+        # 1.0 in head_mask indicate we keep the head
+        attention_probs has shape bsz x n_heads x N x N
+        Arguments:
+            head_mask: torch.Tensor or None: has shape [num_heads] or [num_hidden_layers x num_heads]
+            num_hidden_layers: int
+        Returns:
+             Tensor of shape shape [num_hidden_layers x batch x num_heads x seq_length x seq_length]
+             or list with [None] for each layer
+        """
+        if head_mask is not None:
+            head_mask = self._convert_head_mask_to_5d(head_mask, num_hidden_layers)
+            if is_attention_chunked is True:
+                head_mask = head_mask.unsqueeze(-1)
+        else:
+            head_mask = [None] * num_hidden_layers
+
+        return head_mask
+
+    def _convert_head_mask_to_5d(self, head_mask, num_hidden_layers):
+        """-> [num_hidden_layers x batch x num_heads x seq_length x seq_length]"""
+        if head_mask.dim() == 1:
+            head_mask = head_mask.unsqueeze(0).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+            head_mask = head_mask.expand(num_hidden_layers, -1, -1, -1, -1)
+        elif head_mask.dim() == 2:
+            head_mask = head_mask.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)  # We can specify head_mask for each layer
+        assert head_mask.dim() == 5, f"head_mask.dim != 5, instead {head_mask.dim()}"
+        head_mask = head_mask.to(dtype=self.dtype)  # switch to fload if need + fp16 compatibility
+        return head_mask
+
+
+class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin):
     r""" Base class for all models.
 
         :class:`~transformers.PreTrainedModel` takes care of storing the configuration of the models and handles methods for loading/downloading/saving models
@@ -76,7 +270,6 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin):
 
         Class attributes (overridden by derived classes):
             - ``config_class``: a class derived from :class:`~transformers.PretrainedConfig` to use as configuration class for this model architecture.
-            - ``pretrained_model_archive_map``: a python ``dict`` of with `short-cut-names` (string) as keys and `url` (string) of associated pretrained weights as values.
             - ``load_tf_weights``: a python ``method`` for loading a TensorFlow checkpoint in a PyTorch model, taking as arguments:
 
                 - ``model``: an instance of the relevant subclass of :class:`~transformers.PreTrainedModel`,
@@ -86,7 +279,6 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin):
             - ``base_model_prefix``: a string indicating the attribute associated to the base model in derived classes of the same architecture adding modules on top of the base model.
     """
     config_class = None
-    pretrained_model_archive_map = {}
     base_model_prefix = ""
 
     @property
@@ -129,7 +321,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin):
         else:
             raise NotImplementedError
 
-    def set_input_embeddings(self, value):
+    def set_input_embeddings(self, value: nn.Module):
         """
         Set model's input embeddings
 
@@ -164,24 +356,24 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin):
             self._tie_or_clone_weights(output_embeddings, self.get_input_embeddings())
 
     def _tie_or_clone_weights(self, output_embeddings, input_embeddings):
-        """ Tie or clone module weights depending of weither we are using TorchScript or not
+        """ Tie or clone module weights depending of whether we are using TorchScript or not
         """
         if self.config.torchscript:
             output_embeddings.weight = nn.Parameter(input_embeddings.weight.clone())
         else:
             output_embeddings.weight = input_embeddings.weight
 
-        if hasattr(output_embeddings, "bias") and output_embeddings.bias is not None:
+        if getattr(output_embeddings, "bias", None) is not None:
             output_embeddings.bias.data = torch.nn.functional.pad(
                 output_embeddings.bias.data,
-                (0, output_embeddings.weight.shape[0] - output_embeddings.bias.shape[0]),
+                (0, output_embeddings.weight.shape[0] - output_embeddings.bias.shape[0],),
                 "constant",
                 0,
             )
         if hasattr(output_embeddings, "out_features") and hasattr(input_embeddings, "num_embeddings"):
             output_embeddings.out_features = input_embeddings.num_embeddings
 
-    def resize_token_embeddings(self, new_num_tokens=None):
+    def resize_token_embeddings(self, new_num_tokens: Optional[int] = None):
         """ Resize input token embeddings matrix of the model if new_num_tokens != config.vocab_size.
         Take care of tying weights embeddings afterwards if the model class has a `tie_weights()` method.
 
@@ -214,18 +406,22 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin):
         self.set_input_embeddings(new_embeddings)
         return self.get_input_embeddings()
 
-    def _get_resized_embeddings(self, old_embeddings, new_num_tokens=None):
+    def _get_resized_embeddings(
+        self, old_embeddings: torch.nn.Embedding, new_num_tokens: Optional[int] = None
+    ) -> torch.nn.Embedding:
         """ Build a resized Embedding Module from a provided token Embedding Module.
             Increasing the size will add newly initialized vectors at the end
             Reducing the size will remove vectors from the end
 
         Args:
+            old_embeddings: ``torch.nn.Embedding``
+                Old embeddings to be resized.
             new_num_tokens: (`optional`) int
                 New number of tokens in the embedding matrix.
                 Increasing the size will add newly initialized vectors at the end
                 Reducing the size will remove vectors from the end
                 If not provided or None: return the provided token Embedding Module.
-        Return: ``torch.nn.Embeddings``
+        Return: ``torch.nn.Embedding``
             Pointer to the resized Embedding Module or the old Embedding Module if new_num_tokens is None
         """
         if new_num_tokens is None:
@@ -242,7 +438,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin):
         # initialize all new embeddings (in particular added tokens)
         self._init_weights(new_embeddings)
 
-        # Copy word embeddings from the previous weights
+        # Copy token embeddings from the previous weights
         num_tokens_to_copy = min(old_num_tokens, new_num_tokens)
         new_embeddings.weight.data[:num_tokens_to_copy, :] = old_embeddings.weight.data[:num_tokens_to_copy, :]
 
@@ -260,7 +456,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin):
         # Tie weights if needed
         self.tie_weights()
 
-    def prune_heads(self, heads_to_prune):
+    def prune_heads(self, heads_to_prune: Dict):
         """ Prunes heads of the base model.
 
             Arguments:
@@ -278,10 +474,14 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin):
     def save_pretrained(self, save_directory):
         """ Save a model and its configuration file to a directory, so that it
             can be re-loaded using the `:func:`~transformers.PreTrainedModel.from_pretrained`` class method.
+
+            Arguments:
+                save_directory: directory to which to save.
         """
-        assert os.path.isdir(
-            save_directory
-        ), "Saving path should be a directory where the model and configuration can be saved"
+        if os.path.isfile(save_directory):
+            logger.error("Provided path ({}) should be a directory, not a file".format(save_directory))
+            return
+        os.makedirs(save_directory, exist_ok=True)
 
         # Only save the model itself if we are using distributed training
         model_to_save = self.module if hasattr(self, "module") else self
@@ -289,12 +489,21 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin):
         # Attach architecture to the config
         model_to_save.config.architectures = [model_to_save.__class__.__name__]
 
-        # Save configuration file
-        model_to_save.config.save_pretrained(save_directory)
-
         # If we save using the predefined names, we can load using `from_pretrained`
         output_model_file = os.path.join(save_directory, WEIGHTS_NAME)
-        torch.save(model_to_save.state_dict(), output_model_file)
+
+        if getattr(self.config, "xla_device", False):
+            import torch_xla.core.xla_model as xm
+
+            if xm.is_master_ordinal():
+                # Save configuration file
+                model_to_save.config.save_pretrained(save_directory)
+            # xm.save takes care of saving only from master
+            xm.save(model_to_save.state_dict(), output_model_file)
+        else:
+            model_to_save.config.save_pretrained(save_directory)
+            torch.save(model_to_save.state_dict(), output_model_file)
+
         logger.info("Model weights saved in {}".format(output_model_file))
 
     @classmethod
@@ -323,6 +532,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin):
             config: (`optional`) one of:
                 - an instance of a class derived from :class:`~transformers.PretrainedConfig`, or
                 - a string valid as input to :func:`~transformers.PretrainedConfig.from_pretrained()`
+
                 Configuration for the model to use instead of an automatically loaded configuation. Configuration can be automatically loaded when:
                     - the model is a model provided by the library (loaded with the ``shortcut-name`` string of a pretrained model), or
                     - the model was saved using :func:`~transformers.PreTrainedModel.save_pretrained` and is reloaded by suppling the save directory.
@@ -376,6 +586,8 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin):
         resume_download = kwargs.pop("resume_download", False)
         proxies = kwargs.pop("proxies", None)
         output_loading_info = kwargs.pop("output_loading_info", False)
+        local_files_only = kwargs.pop("local_files_only", False)
+        use_cdn = kwargs.pop("use_cdn", True)
 
         # Load config if we don't provide a configuration
         if not isinstance(config, PretrainedConfig):
@@ -388,6 +600,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin):
                 force_download=force_download,
                 resume_download=resume_download,
                 proxies=proxies,
+                local_files_only=local_files_only,
                 **kwargs,
             )
         else:
@@ -395,9 +608,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin):
 
         # Load model
         if pretrained_model_name_or_path is not None:
-            if pretrained_model_name_or_path in cls.pretrained_model_archive_map:
-                archive_file = cls.pretrained_model_archive_map[pretrained_model_name_or_path]
-            elif os.path.isdir(pretrained_model_name_or_path):
+            if os.path.isdir(pretrained_model_name_or_path):
                 if from_tf and os.path.isfile(os.path.join(pretrained_model_name_or_path, TF_WEIGHTS_NAME + ".index")):
                     # Load from a TF 1.0 checkpoint
                     archive_file = os.path.join(pretrained_model_name_or_path, TF_WEIGHTS_NAME + ".index")
@@ -410,7 +621,8 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin):
                 else:
                     raise EnvironmentError(
                         "Error no file named {} found in directory {} or `from_tf` set to False".format(
-                            [WEIGHTS_NAME, TF2_WEIGHTS_NAME, TF_WEIGHTS_NAME + ".index"], pretrained_model_name_or_path
+                            [WEIGHTS_NAME, TF2_WEIGHTS_NAME, TF_WEIGHTS_NAME + ".index"],
+                            pretrained_model_name_or_path,
                         )
                     )
             elif os.path.isfile(pretrained_model_name_or_path) or is_remote_url(pretrained_model_name_or_path):
@@ -424,32 +636,29 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin):
                 archive_file = pretrained_model_name_or_path + ".index"
             else:
                 archive_file = hf_bucket_url(
-                    pretrained_model_name_or_path, postfix=(TF2_WEIGHTS_NAME if from_tf else WEIGHTS_NAME)
+                    pretrained_model_name_or_path,
+                    filename=(TF2_WEIGHTS_NAME if from_tf else WEIGHTS_NAME),
+                    use_cdn=use_cdn,
                 )
 
-            # redirect to the cache, if necessary
             try:
+                # Load from URL or cache if already cached
                 resolved_archive_file = cached_path(
                     archive_file,
                     cache_dir=cache_dir,
                     force_download=force_download,
                     proxies=proxies,
                     resume_download=resume_download,
+                    local_files_only=local_files_only,
                 )
+                if resolved_archive_file is None:
+                    raise EnvironmentError
             except EnvironmentError:
-                if pretrained_model_name_or_path in cls.pretrained_model_archive_map:
-                    msg = "Couldn't reach server at '{}' to download pretrained weights.".format(archive_file)
-                else:
-                    msg = (
-                        "Model name '{}' was not found in model name list ({}). "
-                        "We assumed '{}' was a path or url to model weight files named one of {} but "
-                        "couldn't find any such file at this path or url.".format(
-                            pretrained_model_name_or_path,
-                            ", ".join(cls.pretrained_model_archive_map.keys()),
-                            archive_file,
-                            [WEIGHTS_NAME, TF2_WEIGHTS_NAME, TF_WEIGHTS_NAME],
-                        )
-                    )
+                msg = (
+                    f"Can't load weights for '{pretrained_model_name_or_path}'. Make sure that:\n\n"
+                    f"- '{pretrained_model_name_or_path}' is a correct model identifier listed on 'https://huggingface.co/models'\n\n"
+                    f"- or '{pretrained_model_name_or_path}' is the correct path to a directory containing a file named one of {WEIGHTS_NAME}, {TF2_WEIGHTS_NAME}, {TF_WEIGHTS_NAME}.\n\n"
+                )
                 raise EnvironmentError(msg)
 
             if resolved_archive_file == archive_file:
@@ -518,7 +727,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin):
             def load(module: nn.Module, prefix=""):
                 local_metadata = {} if metadata is None else metadata.get(prefix[:-1], {})
                 module._load_from_state_dict(
-                    state_dict, prefix, local_metadata, True, missing_keys, unexpected_keys, error_msgs
+                    state_dict, prefix, local_metadata, True, missing_keys, unexpected_keys, error_msgs,
                 )
                 for name, child in module._modules.items():
                     if child is not None:
@@ -527,27 +736,44 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin):
             # Make sure we are able to load base models as well as derived models (with heads)
             start_prefix = ""
             model_to_load = model
-            if not hasattr(model, cls.base_model_prefix) and any(
-                s.startswith(cls.base_model_prefix) for s in state_dict.keys()
-            ):
+            has_prefix_module = any(s.startswith(cls.base_model_prefix) for s in state_dict.keys())
+            if not hasattr(model, cls.base_model_prefix) and has_prefix_module:
                 start_prefix = cls.base_model_prefix + "."
-            if hasattr(model, cls.base_model_prefix) and not any(
-                s.startswith(cls.base_model_prefix) for s in state_dict.keys()
-            ):
+            if hasattr(model, cls.base_model_prefix) and not has_prefix_module:
                 model_to_load = getattr(model, cls.base_model_prefix)
 
             load(model_to_load, prefix=start_prefix)
-            if len(missing_keys) > 0:
-                logger.info(
-                    "Weights of {} not initialized from pretrained model: {}".format(
-                        model.__class__.__name__, missing_keys
-                    )
-                )
+
+            if model.__class__.__name__ != model_to_load.__class__.__name__:
+                base_model_state_dict = model_to_load.state_dict().keys()
+                head_model_state_dict_without_base_prefix = [
+                    key.split(cls.base_model_prefix + ".")[-1] for key in model.state_dict().keys()
+                ]
+
+                missing_keys.extend(head_model_state_dict_without_base_prefix - base_model_state_dict)
+
             if len(unexpected_keys) > 0:
+                logger.warning(
+                    f"Some weights of the model checkpoint at {pretrained_model_name_or_path} were not used when "
+                    f"initializing {model.__class__.__name__}: {unexpected_keys}\n"
+                    f"- This IS expected if you are initializing {model.__class__.__name__} from the checkpoint of a model trained on another task "
+                    f"or with another architecture (e.g. initializing a BertForSequenceClassification model from a BertForPretraining model).\n"
+                    f"- This IS NOT expected if you are initializing {model.__class__.__name__} from the checkpoint of a model that you expect "
+                    f"to be exactly identical (initializing a BertForSequenceClassification model from a BertForSequenceClassification model)."
+                )
+            else:
+                logger.info(f"All model checkpoint weights were used when initializing {model.__class__.__name__}.\n")
+            if len(missing_keys) > 0:
+                logger.warning(
+                    f"Some weights of {model.__class__.__name__} were not initialized from the model checkpoint at {pretrained_model_name_or_path} "
+                    f"and are newly initialized: {missing_keys}\n"
+                    f"You should probably TRAIN this model on a down-stream task to be able to use it for predictions and inference."
+                )
+            else:
                 logger.info(
-                    "Weights from pretrained model not used in {}: {}".format(
-                        model.__class__.__name__, unexpected_keys
-                    )
+                    f"All the weights of {model.__class__.__name__} were initialized from the model checkpoint at {pretrained_model_name_or_path}.\n"
+                    f"If your task is similar to the task the model of the ckeckpoint was trained on, "
+                    f"you can already use {model.__class__.__name__} for predictions without further training."
                 )
             if len(error_msgs) > 0:
                 raise RuntimeError(
@@ -555,564 +781,26 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin):
                         model.__class__.__name__, "\n\t".join(error_msgs)
                     )
                 )
+        model.tie_weights()  # make sure token embedding weights are still tied if needed
 
-        model.tie_weights()  # make sure word embedding weights are still tied if needed
-
-        # Set model in evaluation mode to desactivate DropOut modules by default
+        # Set model in evaluation mode to deactivate DropOut modules by default
         model.eval()
 
         if output_loading_info:
-            loading_info = {"missing_keys": missing_keys, "unexpected_keys": unexpected_keys, "error_msgs": error_msgs}
+            loading_info = {
+                "missing_keys": missing_keys,
+                "unexpected_keys": unexpected_keys,
+                "error_msgs": error_msgs,
+            }
             return model, loading_info
 
+        if hasattr(config, "xla_device") and config.xla_device:
+            import torch_xla.core.xla_model as xm
+
+            model = xm.send_cpu_data_to_device(model, xm.xla_device())
+            model.to(xm.xla_device())
+
         return model
-
-    def prepare_inputs_for_generation(self, input_ids, **kwargs):
-        return {"input_ids": input_ids}
-
-    def _do_output_past(self, outputs):
-        has_output_past = hasattr(self.config, "output_past") and self.config.output_past
-        has_mem_len = hasattr(self.config, "mem_len") and self.config.mem_len
-
-        if has_output_past and not has_mem_len and len(outputs) > 1:
-            return True
-        elif has_mem_len and self.config.mem_len > 0 and len(outputs) > 1:
-            return True
-
-        return False
-
-    @torch.no_grad()
-    def generate(
-        self,
-        input_ids=None,
-        max_length=None,
-        do_sample=True,
-        num_beams=None,
-        temperature=None,
-        top_k=None,
-        top_p=None,
-        repetition_penalty=None,
-        bos_token_id=None,
-        pad_token_id=None,
-        eos_token_ids=None,
-        length_penalty=None,
-        num_return_sequences=None,
-    ):
-        r""" Generates sequences for models with a LM head. The method currently supports greedy or penalized greedy decoding, sampling with top-k or nucleus sampling
-        and beam-search.
-
-        Adapted in part from `Facebook's XLM beam search code`_.
-
-        .. _`Facebook's XLM beam search code`:
-           https://github.com/facebookresearch/XLM/blob/9e6f6814d17be4fe5b15f2e6c43eb2b2d76daeb4/src/model/transformer.py#L529
-
-
-        Parameters:
-
-            input_ids: (`optional`) `torch.LongTensor` of shape `(batch_size, sequence_length)`
-                The sequence used as a prompt for the generation. If `None` the method initializes
-                it as an empty `torch.LongTensor` of shape `(1,)`.
-
-            max_length: (`optional`) int
-                The max length of the sequence to be generated.  Between 1 and infinity. Default to 20.
-
-            do_sample: (`optional`) bool
-                If set to `False` greedy decoding is used. Otherwise sampling is used. Defaults to `True`.
-
-            num_beams: (`optional`) int
-                Number of beams for beam search. Must be between 1 and infinity. 1 means no beam search. Default to 1.
-
-            temperature: (`optional`) float
-                The value used to module the next token probabilities. Must be strictely positive. Default to 1.0.
-
-            top_k: (`optional`) int
-                The number of highest probability vocabulary tokens to keep for top-k-filtering. Between 1 and infinity. Default to 50.
-
-            top_p: (`optional`) float
-                The cumulative probability of parameter highest probability vocabulary tokens to keep for nucleus sampling. Must be between 0 and 1. Default to 1.
-
-            repetition_penalty: (`optional`) float
-                The parameter for repetition penalty. Between 1.0 and infinity. 1.0 means no penalty. Default to 1.0.
-
-            bos_token_id: (`optional`) int
-                Beginning of sentence token if no prompt is provided. Default to 0.
-
-            eos_token_ids: (`optional`) int or list of int
-                End of sequence token or list of tokens to stop the generation. Default to 0.
-            length_penalty: (`optional`) float
-                Exponential penalty to the length. Default to 1.
-
-            num_return_sequences: (`optional`) int
-                The number of independently computed returned sequences for each element in the batch. Default to 1.
-
-        Examples::
-
-            tokenizer = AutoTokenizer.from_pretrained('distilgpt2')   # Initialize tokenizer
-            model = AutoModelWithLMHead.from_pretrained('distilgpt2')    # Download model and configuration from S3 and cache.
-            outputs = model.generate(max_length=40, bos_token_id=tokenizer.bos_token_id, eos_token_ids=tokenizer.eos_token_id)  # do greedy decoding without beam search
-            print('Generated: {}'.format(tokenizer.decode(outputs[0], skip_special_tokens=True)))
-
-            tokenizer = AutoTokenizer.from_pretrained('openai-gpt')   # Initialize tokenizer
-            model = AutoModelWithLMHead.from_pretrained('openai-gpt')    # Download model and configuration from S3 and cache.
-            input_context = 'The dog'
-            input_ids = torch.tensor(tokenizer.encode(input_context)).unsqueeze(0)  # encode input context
-            outputs = model.generate(input_ids=input_ids, do_sample=True, num_beams=5, num_return_sequences=3, temperature=1.5)  # generate 3 independent sequences using beam search decoding (5 beams) with sampling from initial context 'The dog'
-            for i in range(3): #  3 output sequences were generated
-                print('Generated {}: {}'.format(i, tokenizer.decode(outputs[0][i], skip_special_tokens=True)))
-
-            tokenizer = AutoTokenizer.from_pretrained('distilgpt2')   # Initialize tokenizer
-            model = AutoModelWithLMHead.from_pretrained('distilgpt2')    # Download model and configuration from S3 and cache.
-            input_context = 'The dog'
-            input_ids = torch.tensor(tokenizer.encode(input_context)).unsqueeze(0)  # encode input context
-            outputs = model.generate(input_ids=input_ids, max_length=40, temperature=0.7, bos_token_id=tokenizer.bos_token_id, eos_token_ids=tokenizer.eos_token_id, num_beams=3)  # generate sequences using greedy beam search decoding (3 beams)
-            print('Generated: {}'.format(tokenizer.decode(outputs[0], skip_special_tokens=True)))
-
-            tokenizer = AutoTokenizer.from_pretrained('ctrl')   # Initialize tokenizer
-            model = AutoModelWithLMHead.from_pretrained('ctrl')    # Download model and configuration from S3 and cache.
-            input_context = 'Legal My neighbor is'  # "Legal" is one of the control codes for ctrl
-            input_ids = torch.tensor(tokenizer.encode(input_context)).unsqueeze(0)  # encode input context
-            outputs = model.generate(input_ids=input_ids, max_length=50, temperature=0.7, repetition_penalty=1.2)  # generate sequences using using greedy search
-            print('Generated: {}'.format(tokenizer.decode(outputs[0], skip_special_tokens=True)))
-
-        """
-
-        # We cannot generate if the model does not have a LM head
-        if self.get_output_embeddings() is None:
-            raise AttributeError(
-                "You tried to generate sequences with a model that does not have a LM Head."
-                "Please use another model class (e.g. `OpenAIGPTLMHeadModel`, `XLNetLMHeadModel`, `GPT2LMHeadModel`, `CTRLLMHeadModel`, `T5WithLMHeadModel`, `TransfoXLLMHeadModel`)"
-            )
-
-        max_length = max_length if max_length is not None else self.config.max_length
-        do_sample = do_sample if do_sample is not None else self.config.do_sample
-        num_beams = num_beams if num_beams is not None else self.config.num_beams
-        temperature = temperature if temperature is not None else self.config.temperature
-        top_k = top_k if top_k is not None else self.config.top_k
-        top_p = top_p if top_p is not None else self.config.top_p
-        repetition_penalty = repetition_penalty if repetition_penalty is not None else self.config.repetition_penalty
-        bos_token_id = bos_token_id if bos_token_id is not None else self.config.bos_token_id
-        pad_token_id = pad_token_id if pad_token_id is not None else self.config.pad_token_id
-        eos_token_ids = eos_token_ids if eos_token_ids is not None else self.config.eos_token_ids
-        length_penalty = length_penalty if length_penalty is not None else self.config.length_penalty
-        num_return_sequences = (
-            num_return_sequences if num_return_sequences is not None else self.config.num_return_sequences
-        )
-
-        if input_ids is not None:
-            batch_size = input_ids.shape[0]  # overriden by the input batch_size
-        else:
-            batch_size = 1
-        if isinstance(eos_token_ids, int):
-            eos_token_ids = [eos_token_ids]
-
-        assert isinstance(max_length, int) and max_length > 0, "`max_length` should be a strictely positive integer."
-        assert isinstance(do_sample, bool), "`do_sample` should be a boolean."
-        assert isinstance(num_beams, int) and num_beams > 0, "`num_beams` should be a strictely positive integer."
-        assert temperature > 0, "`temperature` should be strictely positive."
-        assert isinstance(top_k, int) and top_k >= 0, "`top_k` should be a positive integer."
-        assert 0 <= top_p <= 1, "`top_p` should be between 0 and 1."
-        assert repetition_penalty >= 1.0, "`repetition_penalty` should be >= 1."
-        assert isinstance(bos_token_id, int) and bos_token_id >= 0, "`bos_token_id` should be a positive integer."
-        assert isinstance(pad_token_id, int) and pad_token_id >= 0, "`pad_token_id` should be a positive integer."
-        assert isinstance(eos_token_ids, (list, tuple)) and (
-            e >= 0 for e in eos_token_ids
-        ), "`eos_token_ids` should be a positive integer or a list/tuple of positive integers."
-        assert length_penalty > 0, "`length_penalty` should be strictely positive."
-        assert (
-            isinstance(num_return_sequences, int) and num_return_sequences > 0
-        ), "`num_return_sequences` should be a strictely positive integer."
-
-        if input_ids is None:
-            input_ids = torch.full(
-                (batch_size, 1), bos_token_id, dtype=torch.long, device=next(self.parameters()).device
-            )
-        else:
-            assert input_ids.dim() == 2, "Input prompt should be of shape (batch_size, sequence length)."
-
-        # current position and vocab size
-        cur_len = input_ids.shape[1]
-        vocab_size = self.config.vocab_size
-
-        if num_return_sequences != 1:
-            # Expand input to num return sequences
-            input_ids = input_ids.unsqueeze(1).expand(batch_size, num_return_sequences, cur_len)
-            input_ids = input_ids.contiguous().view(
-                batch_size * num_return_sequences, cur_len
-            )  # (batch_size * num_return_sequences, cur_len)
-            effective_batch_size = batch_size * num_return_sequences
-        else:
-            effective_batch_size = batch_size
-
-        if num_beams > 1:
-            output = self._generate_beam_search(
-                input_ids,
-                cur_len,
-                max_length,
-                do_sample,
-                temperature,
-                top_k,
-                top_p,
-                repetition_penalty,
-                pad_token_id,
-                eos_token_ids,
-                effective_batch_size,
-                length_penalty,
-                num_beams,
-                vocab_size,
-            )
-        else:
-            output = self._generate_no_beam_search(
-                input_ids,
-                cur_len,
-                max_length,
-                do_sample,
-                temperature,
-                top_k,
-                top_p,
-                repetition_penalty,
-                pad_token_id,
-                eos_token_ids,
-                effective_batch_size,
-            )
-
-        if num_return_sequences != 1:
-            output = output.view(batch_size, num_return_sequences, -1)
-        return output
-
-    def _generate_no_beam_search(
-        self,
-        input_ids,
-        cur_len,
-        max_length,
-        do_sample,
-        temperature,
-        top_k,
-        top_p,
-        repetition_penalty,
-        pad_token_id,
-        eos_token_ids,
-        batch_size,
-    ):
-        """ Generate sequences for each example without beam search (num_beams == 1).
-            All returned sequence are generated independantly.
-        """
-        # current position / max lengths / length of generated sentences / unfinished sentences
-        unfinished_sents = input_ids.new(batch_size).fill_(1)
-
-        past = None
-
-        while cur_len < max_length:
-            model_inputs = self.prepare_inputs_for_generation(input_ids, past=past)
-            outputs = self(**model_inputs)
-            next_token_logits = outputs[0][:, -1, :]
-
-            # if model has past, then set the past variable to speed up decoding
-            if self._do_output_past(outputs):
-                past = outputs[1]
-
-            # repetition penalty from CTRL paper (https://arxiv.org/abs/1909.05858)
-            if repetition_penalty != 1.0:
-                for i in range(batch_size):
-                    for previous_token in set(input_ids[i].tolist()):
-                        # if score < 0 then repetition penalty has to multiplied to reduce the previous token probability
-                        if next_token_logits[i, previous_token] < 0:
-                            next_token_logits[i, previous_token] *= repetition_penalty
-                        else:
-                            next_token_logits[i, previous_token] /= repetition_penalty
-
-            if do_sample:
-                # Temperature (higher temperature => more likely to sample low probability tokens)
-                if temperature != 1.0:
-                    next_token_logits = next_token_logits / temperature
-                # Top-p/top-k filtering
-                next_token_logits = top_k_top_p_filtering(next_token_logits, top_k=top_k, top_p=top_p)
-                # Sample
-                next_token = torch.multinomial(F.softmax(next_token_logits, dim=-1), num_samples=1).squeeze(1)
-            else:
-                # Greedy decoding
-                next_token = torch.argmax(next_token_logits, dim=-1)
-
-            # update generations and finished sentences
-            tokens_to_add = next_token * unfinished_sents + pad_token_id * (1 - unfinished_sents)
-            input_ids = torch.cat([input_ids, tokens_to_add.unsqueeze(-1)], dim=-1)
-            for eos_token_id in eos_token_ids:
-                unfinished_sents.mul_(tokens_to_add.ne(eos_token_id).long())
-            cur_len = cur_len + 1
-
-            # stop when there is a </s> in each sentence, or if we exceed the maximul length
-            if unfinished_sents.max() == 0:
-                break
-
-        # add eos_token_ids to unfinished sentences
-        if cur_len == max_length:
-            input_ids[:, -1].masked_fill_(unfinished_sents.to(dtype=torch.bool), eos_token_ids[0])
-
-        return input_ids
-
-    def _generate_beam_search(
-        self,
-        input_ids,
-        cur_len,
-        max_length,
-        do_sample,
-        temperature,
-        top_k,
-        top_p,
-        repetition_penalty,
-        pad_token_id,
-        eos_token_ids,
-        batch_size,
-        length_penalty,
-        num_beams,
-        vocab_size,
-    ):
-        """ Generate sequences for each example with beam search.
-        """
-        # Expand input to num beams
-        input_ids = input_ids.unsqueeze(1).expand(batch_size, num_beams, cur_len)
-        input_ids = input_ids.contiguous().view(batch_size * num_beams, cur_len)  # (batch_size * num_beams, cur_len)
-
-        # generated hypotheses
-        generated_hyps = [
-            BeamHypotheses(num_beams, max_length, length_penalty, early_stopping=False) for _ in range(batch_size)
-        ]
-
-        # scores for each sentence in the beam
-        beam_scores = torch.zeros((batch_size, num_beams), dtype=torch.float, device=input_ids.device)
-        beam_scores[:, 1:] = -1e9
-        beam_scores = beam_scores.view(-1)  # shape (batch_size * num_beams,)
-
-        # cache compute states
-        past = None
-
-        # done sentences
-        done = [False for _ in range(batch_size)]
-
-        while cur_len < max_length:
-            model_inputs = self.prepare_inputs_for_generation(input_ids, past=past)
-            outputs = self(**model_inputs)  # (batch_size * num_beams, cur_len, vocab_size)
-            scores = outputs[0][:, -1, :]  # (batch_size * num_beams, vocab_size)
-
-            # if model has past, then set the past variable to speed up decoding
-            if self._do_output_past(outputs):
-                past = outputs[1]
-
-            # repetition penalty (from CTRL paper https://arxiv.org/abs/1909.05858)
-            if repetition_penalty != 1.0:
-                for i in range(batch_size * num_beams):
-                    for previous_token in set(input_ids[i].tolist()):
-                        # if score < 0 then repetition penalty has to multiplied to reduce the previous token probability
-                        if scores[i, previous_token] < 0:
-                            scores[i, previous_token] *= repetition_penalty
-                        else:
-                            scores[i, previous_token] /= repetition_penalty
-
-            if do_sample:
-                # Temperature (higher temperature => more likely to sample low probability tokens)
-                if temperature != 1.0:
-                    scores = scores / temperature
-                # Top-p/top-k filtering
-                scores = top_k_top_p_filtering(
-                    scores, top_k=top_k, top_p=top_p, min_tokens_to_keep=2
-                )  # (batch_size * num_beams, vocab_size)
-                # Sample 2 next words for each beam (so we have some spare tokens and match output of greedy beam search)
-                next_words = torch.multinomial(F.softmax(scores, dim=-1), num_samples=2)  # (batch_size * num_beams, 2)
-                # Compute next scores
-                _scores = F.log_softmax(scores, dim=-1)  # (batch_size * num_beams, vocab_size)
-                _scores = torch.gather(_scores, -1, next_words)  # (batch_size * num_beams, 2)
-                next_scores = _scores + beam_scores[:, None].expand_as(_scores)  # (batch_size * num_beams, 2)
-                # Match shape of greedy beam search
-                next_words = next_words.view(batch_size, 2 * num_beams)  # (batch_size, 2 * num_beams)
-                next_scores = next_scores.view(batch_size, 2 * num_beams)  # (batch_size, 2 * num_beams)
-            else:
-                # do greedy beam search
-                scores = F.log_softmax(scores, dim=-1)  # (batch_size * num_beams, vocab_size)
-                assert scores.size() == (batch_size * num_beams, vocab_size)
-                # Add the log prob of the new beams to the log prob of the beginning of the sequence (sum of logs == log of the product)
-                _scores = scores + beam_scores[:, None].expand_as(scores)  # (batch_size * num_beams, vocab_size)
-                # re-organize to group the beam together (we are keeping top hypothesis accross beams)
-                _scores = _scores.view(batch_size, num_beams * vocab_size)  # (batch_size, num_beams * vocab_size)
-                next_scores, next_words = torch.topk(_scores, 2 * num_beams, dim=1, largest=True, sorted=True)
-
-            assert next_scores.size() == next_words.size() == (batch_size, 2 * num_beams)
-
-            # next batch beam content
-            # list of (batch_size * num_beams) tuple(next hypothesis score, next word, current position in the batch)
-            next_batch_beam = []
-
-            # for each sentence
-            for batch_ex in range(batch_size):
-
-                # if we are done with this sentence
-                done[batch_ex] = done[batch_ex] or generated_hyps[batch_ex].is_done(next_scores[batch_ex].max().item())
-                if done[batch_ex]:
-                    next_batch_beam.extend([(0, pad_token_id, 0)] * num_beams)  # pad the batch
-                    continue
-
-                # next sentence beam content
-                next_sent_beam = []
-
-                # next words for this sentence
-                for idx, score in zip(next_words[batch_ex], next_scores[batch_ex]):
-
-                    # get beam and word IDs
-                    beam_id = idx // vocab_size
-                    word_id = idx % vocab_size
-
-                    # end of sentence, or next word
-                    if word_id.item() in eos_token_ids or cur_len + 1 == max_length:
-                        generated_hyps[batch_ex].add(
-                            input_ids[batch_ex * num_beams + beam_id, :cur_len].clone(), score.item()
-                        )
-                    else:
-                        next_sent_beam.append((score, word_id, batch_ex * num_beams + beam_id))
-
-                    # the beam for next step is full
-                    if len(next_sent_beam) == num_beams:
-                        break
-
-                # update next beam content
-                assert len(next_sent_beam) == 0 if cur_len + 1 == max_length else num_beams
-                if len(next_sent_beam) == 0:
-                    next_sent_beam = [(0, pad_token_id, 0)] * num_beams  # pad the batch
-                next_batch_beam.extend(next_sent_beam)
-                assert len(next_batch_beam) == num_beams * (batch_ex + 1)
-
-            # sanity check / prepare next batch
-            assert len(next_batch_beam) == batch_size * num_beams
-            beam_scores = beam_scores.new([x[0] for x in next_batch_beam])
-            beam_words = input_ids.new([x[1] for x in next_batch_beam])
-            beam_idx = input_ids.new([x[2] for x in next_batch_beam])
-
-            # re-order batch
-            input_ids = input_ids[beam_idx, :]
-            input_ids = torch.cat([input_ids, beam_words.unsqueeze(1)], dim=-1)
-
-            # re-order internal states
-            if past:
-                reordered_past = []
-                for layer_past in past:
-                    # get the correct batch idx from layer past batch dim
-                    # batch dim of `past` and `mems` is at 2nd position
-                    reordered_layer_past = [layer_past[:, i].unsqueeze(1).clone().detach() for i in beam_idx]
-                    reordered_layer_past = torch.cat(reordered_layer_past, dim=1)
-                    # check that shape matches
-                    assert reordered_layer_past.shape == layer_past.shape
-                    reordered_past.append(reordered_layer_past)
-                past = tuple(reordered_past)
-
-            # update current length
-            cur_len = cur_len + 1
-
-            # stop when we are done with each sentence
-            if all(done):
-                break
-
-        # visualize hypotheses
-        # print([len(x) for x in generated_hyps], cur_len)
-        # globals().update( locals() );
-        # !import code; code.interact(local=vars())
-        # for ii in range(batch_size):
-        #     for ss, ww in sorted(generated_hyps[ii].hyp, key=lambda x: x[0], reverse=True):
-        #         print("%.3f " % ss + " ".join(self.dico[x] for x in ww.tolist()))
-        #     print("")
-
-        # select the best hypotheses
-        tgt_len = input_ids.new(batch_size)
-        best = []
-
-        for i, hypotheses in enumerate(generated_hyps):
-            best_hyp = max(hypotheses.hyp, key=lambda x: x[0])[1]
-            tgt_len[i] = len(best_hyp) + 1  # +1 for the <EOS> symbol
-            best.append(best_hyp)
-
-        # generate target batch
-        decoded = input_ids.new(batch_size, tgt_len.max().item()).fill_(pad_token_id)
-        for i, hypo in enumerate(best):
-            decoded[i, : tgt_len[i] - 1] = hypo
-            decoded[i, tgt_len[i] - 1] = eos_token_ids[0]
-
-        return decoded
-
-
-def top_k_top_p_filtering(logits, top_k=0, top_p=1.0, filter_value=-float("Inf"), min_tokens_to_keep=1):
-    """ Filter a distribution of logits using top-k and/or nucleus (top-p) filtering
-        Args:
-            logits: logits distribution shape (batch size, vocabulary size)
-            if top_k > 0: keep only top k tokens with highest probability (top-k filtering).
-            if top_p < 1.0: keep the top tokens with cumulative probability >= top_p (nucleus filtering).
-                Nucleus filtering is described in Holtzman et al. (http://arxiv.org/abs/1904.09751)
-            Make sure we keep at least min_tokens_to_keep per batch example in the output
-        From: https://gist.github.com/thomwolf/1a5a29f6962089e871b94cbd09daf317
-    """
-    if top_k > 0:
-        top_k = min(max(top_k, min_tokens_to_keep), logits.size(-1))  # Safety check
-        # Remove all tokens with a probability less than the last token of the top-k
-        indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
-        logits[indices_to_remove] = filter_value
-
-    if top_p < 1.0:
-        sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-        cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-
-        # Remove tokens with cumulative probability above the threshold (token with 0 are kept)
-        sorted_indices_to_remove = cumulative_probs > top_p
-        if min_tokens_to_keep > 1:
-            # Keep at least min_tokens_to_keep (set to min_tokens_to_keep-1 because we add the first one below)
-            sorted_indices_to_remove[..., :min_tokens_to_keep] = 0
-        # Shift the indices to the right to keep also the first token above the threshold
-        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-        sorted_indices_to_remove[..., 0] = 0
-
-        # scatter sorted tensors to original indexing
-        indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
-        logits[indices_to_remove] = filter_value
-    return logits
-
-
-class BeamHypotheses(object):
-    def __init__(self, n_hyp, max_length, length_penalty, early_stopping):
-        """
-        Initialize n-best list of hypotheses.
-        """
-        self.max_length = max_length - 1  # ignoring bos_token
-        self.length_penalty = length_penalty
-        self.early_stopping = early_stopping
-        self.n_hyp = n_hyp
-        self.hyp = []
-        self.worst_score = 1e9
-
-    def __len__(self):
-        """
-        Number of hypotheses in the list.
-        """
-        return len(self.hyp)
-
-    def add(self, hyp, sum_logprobs):
-        """
-        Add a new hypothesis to the list.
-        """
-        score = sum_logprobs / len(hyp) ** self.length_penalty
-        if len(self) < self.n_hyp or score > self.worst_score:
-            self.hyp.append((score, hyp))
-            if len(self) > self.n_hyp:
-                sorted_scores = sorted([(s, idx) for idx, (s, _) in enumerate(self.hyp)])
-                del self.hyp[sorted_scores[0][1]]
-                self.worst_score = sorted_scores[1][0]
-            else:
-                self.worst_score = min(score, self.worst_score)
-
-    def is_done(self, best_sum_logprobs):
-        """
-        If there are enough hypotheses and that none of the hypotheses being generated
-        can become better than the worst one in the heap, then we are done with this sentence.
-        """
-        if len(self) < self.n_hyp:
-            return False
-        elif self.early_stopping:
-            return True
-        else:
-            return self.worst_score >= best_sum_logprobs / self.max_length ** self.length_penalty
 
 
 class Conv1D(nn.Module):
@@ -1303,7 +991,7 @@ class SQuADHead(nn.Module):
         self.answer_class = PoolerAnswerClass(config)
 
     def forward(
-        self, hidden_states, start_positions=None, end_positions=None, cls_index=None, is_impossible=None, p_mask=None
+        self, hidden_states, start_positions=None, end_positions=None, cls_index=None, is_impossible=None, p_mask=None,
     ):
         outputs = ()
 
@@ -1362,7 +1050,7 @@ class SQuADHead(nn.Module):
             start_states = torch.einsum("blh,bl->bh", hidden_states, start_log_probs)
             cls_logits = self.answer_class(hidden_states, start_states=start_states, cls_index=cls_index)
 
-            outputs = (start_top_log_probs, start_top_index, end_top_log_probs, end_top_index, cls_logits) + outputs
+            outputs = (start_top_log_probs, start_top_index, end_top_log_probs, end_top_index, cls_logits,) + outputs
 
         # return start_top_log_probs, start_top_index, end_top_log_probs, end_top_index, cls_logits
         # or (if labels are provided) (total_loss,)
@@ -1404,9 +1092,7 @@ class SequenceSummary(nn.Module):
             self.summary = nn.Linear(config.hidden_size, num_classes)
 
         activation_string = getattr(config, "summary_activation", None)
-        self.activation = (
-            get_activation(activation_string) if activation_string else Identity()
-        )  # type: typing.Callable
+        self.activation: Callable = (get_activation(activation_string) if activation_string else Identity())
 
         self.first_dropout = Identity()
         if hasattr(config, "summary_first_dropout") and config.summary_first_dropout > 0:
@@ -1431,7 +1117,7 @@ class SequenceSummary(nn.Module):
             output = hidden_states.mean(dim=1)
         elif self.summary_type == "cls_index":
             if cls_index is None:
-                cls_index = torch.full_like(hidden_states[..., :1, :], hidden_states.shape[-2] - 1, dtype=torch.long)
+                cls_index = torch.full_like(hidden_states[..., :1, :], hidden_states.shape[-2] - 1, dtype=torch.long,)
             else:
                 cls_index = cls_index.unsqueeze(-1).unsqueeze(-1)
                 cls_index = cls_index.expand((-1,) * (cls_index.dim() - 1) + (hidden_states.size(-1),))
@@ -1446,20 +1132,6 @@ class SequenceSummary(nn.Module):
         output = self.last_dropout(output)
 
         return output
-
-
-def create_position_ids_from_input_ids(input_ids, padding_idx):
-    """ Replace non-padding symbols with their position numbers. Position numbers begin at
-    padding_idx+1. Padding symbols are ignored. This is modified from fairseq's
-    `utils.make_positions`.
-
-    :param torch.Tensor x:
-    :return torch.Tensor:
-    """
-    # The series of casts and type-conversions here are carefully balanced to both work with ONNX export and XLA.
-    mask = input_ids.ne(padding_idx).int()
-    incremental_indicies = torch.cumsum(mask, dim=1).type_as(mask) * mask
-    return incremental_indicies.long() + padding_idx
 
 
 def prune_linear_layer(layer, index, dim=0):
@@ -1522,3 +1194,66 @@ def prune_layer(layer, index, dim=None):
         return prune_conv1d_layer(layer, index, dim=1 if dim is None else dim)
     else:
         raise ValueError("Can't prune layer of class {}".format(layer.__class__))
+
+
+def apply_chunking_to_forward(
+    chunk_size: int, chunk_dim: int, forward_fn: Callable[..., torch.Tensor], *input_tensors
+) -> torch.Tensor:
+    """
+    This function chunks the `input_tensors` into smaller input tensor parts of size `chunk_size` over the dimension `chunk_dim`.
+    It then applies a layer `forward_fn` to each chunk independently to save memory.
+    If the `forward_fn` is independent across the `chunk_dim` this function will yield the
+    same result as not applying it.
+
+    Args:
+        chunk_size: int - the chunk size of a chunked tensor. `num_chunks` = `len(input_tensors[0]) / chunk_size`
+        chunk_dim: int - the dimension over which the input_tensors should be chunked
+        forward_fn: fn - the forward fn of the model
+        input_tensors: tuple(torch.Tensor) - the input tensors of `forward_fn` which are chunked
+    Returns:
+        a Tensor with the same shape the foward_fn would have given if applied
+
+
+    Examples::
+
+        # rename the usual forward() fn to forward_chunk()
+        def forward_chunk(self, hidden_states):
+            hidden_states = self.decoder(hidden_states)
+            return hidden_states
+
+        # implement a chunked forward function
+        def forward(self, hidden_states):
+            return apply_chunking_to_forward(self.chunk_size_lm_head, self.seq_len_dim, self.forward_chunk, hidden_states)
+    """
+
+    assert len(input_tensors) > 0, "{} has to be a tuple/list of tensors".format(input_tensors)
+    tensor_shape = input_tensors[0].shape
+    assert all(
+        input_tensor.shape == tensor_shape for input_tensor in input_tensors
+    ), "All input tenors have to be of the same shape"
+
+    # inspect.signature exist since python 3.5 and is a python method -> no problem with backward compability
+    num_args_in_forward_chunk_fn = len(inspect.signature(forward_fn).parameters)
+    assert num_args_in_forward_chunk_fn == len(
+        input_tensors
+    ), "forward_chunk_fn expects {} arguments, but only {} input tensors are given".format(
+        num_args_in_forward_chunk_fn, len(input_tensors)
+    )
+
+    if chunk_size > 0:
+        assert (
+            input_tensors[0].shape[chunk_dim] % chunk_size == 0
+        ), "The dimension to be chunked {} has to be a multiple of the chunk size {}".format(
+            input_tensors[0].shape[chunk_dim], chunk_size
+        )
+
+        num_chunks = input_tensors[0].shape[chunk_dim] // chunk_size
+
+        # chunk input tensor into tuples
+        input_tensors_chunks = tuple(input_tensor.chunk(num_chunks, dim=chunk_dim) for input_tensor in input_tensors)
+        # apply forward fn to every tuple
+        output_chunks = tuple(forward_fn(*input_tensors_chunk) for input_tensors_chunk in zip(*input_tensors_chunks))
+        # concatenate output at same dimension
+        return torch.cat(output_chunks, dim=chunk_dim)
+
+    return forward_fn(*input_tensors)
