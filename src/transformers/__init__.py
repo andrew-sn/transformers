@@ -303,7 +303,7 @@ if is_torch_available():
         OpenAIGPTLMHeadModel,
         OpenAIGPTDoubleHeadsModel,
         load_tf_weights_in_openai_gpt,
-        OPENAI_GPT_PRETRAINED_MODEL_ARCHIVE_LIST,
+        OPENAI_GPT_PRETRAINED_MODEL_ARCHIVE_LIST)
     from .modeling_bert_generation import (
         BertGenerationDecoder,
         BertGenerationEncoder,
