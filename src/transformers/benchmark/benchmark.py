@@ -23,7 +23,7 @@ from typing import Callable, Optional
 
 from ..configuration_utils import PretrainedConfig
 from ..file_utils import is_py3nvml_available, is_torch_available
-from ..modeling_auto import MODEL_MAPPING, MODEL_WITH_LM_HEAD_MAPPING
+from ..models.auto.modeling_auto import MODEL_MAPPING, MODEL_WITH_LM_HEAD_MAPPING
 from ..utils import logging
 from .benchmark_utils import (
     Benchmark,
@@ -218,7 +218,7 @@ class PyTorchBenchmark(Benchmark):
 
             return min(runtimes) / 10.0
         except RuntimeError as e:
-            self.print_fn("Doesn't fit on GPU. {}".format(e))
+            self.print_fn(f"Doesn't fit on GPU. {e}")
             return "N/A"
 
     def _measure_memory(self, func: Callable[[], None]) -> [Memory, MemorySummary]:
@@ -229,7 +229,7 @@ class PyTorchBenchmark(Benchmark):
             if self.args.is_tpu:
                 # tpu
                 raise NotImplementedError(
-                    "Memory Benchmarking is currently not implemented for TPU. Please disable memory benchmarking with `--no_memory` or `args.no_memory=True`"
+                    "Memory Benchmarking is currently not implemented for TPU. Please disable memory benchmarking with `--no-memory` or `args.memory=False`"
                 )
             elif self.args.is_gpu:
                 if not is_py3nvml_available():
@@ -263,5 +263,5 @@ class PyTorchBenchmark(Benchmark):
 
             return memory, summary
         except RuntimeError as e:
-            self.print_fn("Doesn't fit on GPU. {}".format(e))
+            self.print_fn(f"Doesn't fit on GPU. {e}")
             return "N/A", None

@@ -16,6 +16,7 @@
 
 import logging
 import os
+import sys
 import threading
 from logging import CRITICAL  # NOQA
 from logging import DEBUG  # NOQA
@@ -44,8 +45,8 @@ _default_log_level = logging.WARNING
 
 def _get_default_logging_level():
     """
-    If TRANSFORMERS_VERBOSITY env var is set to one of the valid choices return that as the new default level.
-    If it is not - fall back to ``_default_log_level``
+    If TRANSFORMERS_VERBOSITY env var is set to one of the valid choices return that as the new default level. If it is
+    not - fall back to ``_default_log_level``
     """
     env_level_str = os.getenv("TRANSFORMERS_VERBOSITY", None)
     if env_level_str:
@@ -78,6 +79,7 @@ def _configure_library_root_logger() -> None:
             # This library has already configured the library root logger.
             return
         _default_handler = logging.StreamHandler()  # Set sys.stderr as stream.
+        _default_handler.flush = sys.stderr.flush
 
         # Apply our default configuration to the library root logger.
         library_root_logger = _get_library_root_logger()
@@ -138,7 +140,7 @@ def get_verbosity() -> int:
 
 def set_verbosity(verbosity: int) -> None:
     """
-    Set the vebosity level for the 🤗 Transformers's root logger.
+    Set the verbosity level for the 🤗 Transformers's root logger.
 
     Args:
         verbosity (:obj:`int`):
@@ -193,9 +195,27 @@ def enable_default_handler() -> None:
     _get_library_root_logger().addHandler(_default_handler)
 
 
+def add_handler(handler: logging.Handler) -> None:
+    """adds a handler to the HuggingFace Transformers's root logger."""
+
+    _configure_library_root_logger()
+
+    assert handler is not None
+    _get_library_root_logger().addHandler(handler)
+
+
+def remove_handler(handler: logging.Handler) -> None:
+    """removes given handler from the HuggingFace Transformers's root logger."""
+
+    _configure_library_root_logger()
+
+    assert handler is not None and handler not in _get_library_root_logger().handlers
+    _get_library_root_logger().removeHandler(handler)
+
+
 def disable_propagation() -> None:
-    """Disable propagation of the library log outputs.
-    Note that log propagation is disabled by default.
+    """
+    Disable propagation of the library log outputs. Note that log propagation is disabled by default.
     """
 
     _configure_library_root_logger()
@@ -203,10 +223,39 @@ def disable_propagation() -> None:
 
 
 def enable_propagation() -> None:
-    """Enable propagation of the library log outputs.
-    Please disable the HuggingFace Transformers's default handler to prevent double logging if the root logger has
-    been configured.
+    """
+    Enable propagation of the library log outputs. Please disable the HuggingFace Transformers's default handler to
+    prevent double logging if the root logger has been configured.
     """
 
     _configure_library_root_logger()
     _get_library_root_logger().propagate = True
+
+
+def enable_explicit_format() -> None:
+    """
+    Enable explicit formatting for every HuggingFace Transformers's logger. The explicit formatter is as follows:
+
+    ::
+
+        [LEVELNAME|FILENAME|LINE NUMBER] TIME >> MESSAGE
+
+    All handlers currently bound to the root logger are affected by this method.
+    """
+    handlers = _get_library_root_logger().handlers
+
+    for handler in handlers:
+        formatter = logging.Formatter("[%(levelname)s|%(filename)s:%(lineno)s] %(asctime)s >> %(message)s")
+        handler.setFormatter(formatter)
+
+
+def reset_format() -> None:
+    """
+    Resets the formatting for HuggingFace Transformers's loggers.
+
+    All handlers currently bound to the root logger are affected by this method.
+    """
+    handlers = _get_library_root_logger().handlers
+
+    for handler in handlers:
+        handler.setFormatter(None)

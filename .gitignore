@@ -10,8 +10,10 @@ __pycache__/
 *.so
 
 # tests and logs
-tests/fixtures
+tests/fixtures/cached_*_text.txt
 logs/
+lightning_logs/
+lang_code_data/
 
 # Distribution / packaging
 .Python
@@ -131,7 +133,6 @@ dmypy.json
 tensorflow_code
 
 # Models
-models
 proc_data
 
 # examples
@@ -140,6 +141,7 @@ runs
 /wandb
 /examples/runs
 /examples/**/*.args
+/examples/rag/sweep
 
 # data
 /data
@@ -154,3 +156,9 @@ debug.env
 
 #ctags
 tags
+
+# pre-commit
+.pre-commit*
+
+# .lock
+*.lock

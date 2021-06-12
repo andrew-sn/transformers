@@ -1,3 +1,19 @@
+<!---
+Copyright 2020 The HuggingFace Team. All rights reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+
 # How to contribute to transformers?
 
 Everyone is welcome to contribute, and we value everybody's contribution. Code
@@ -9,6 +25,9 @@ It also helps us if you spread the word: reference the library from blog posts
 on the awesome projects it made possible, shout out on Twitter every time it has
 helped you, or simply star the repo to say "thank you".
 
+Whichever way you choose to contribute, please be mindful to respect our
+[code of conduct](https://github.com/huggingface/transformers/blob/master/CODE_OF_CONDUCT.md).
+
 ## You can contribute in so many ways!
 
 There are 4 ways you can contribute to transformers:
@@ -16,6 +35,13 @@ There are 4 ways you can contribute to transformers:
 * Implementing new models;
 * Contributing to the examples or to the documentation;
 * Submitting issues related to bugs or desired new features.
+
+In particular there is a special [Good First
+Issue](https://github.com/huggingface/transformers/contribute) listing. It will give you a list of
+open Issues that are open to anybody to work on. Just comment in the issue that you'd like to work
+on it. In that same listing you will also find some Issues with `Good Second Issue` label. These are
+typically slightly more complicated than the Issues with just `Good First Issue` label. But if you
+feel you know what you're doing, go for it.
 
 *All are equally valuable to the community.*
 
@@ -27,7 +53,7 @@ feedback.
 
 ### Did you find a bug?
 
-The transformers are robust and reliable thanks to the users who notify us of
+The 🤗 Transformers library is robust and reliable thanks to the users who notify us of
 the problems they encounter. So thank you for reporting an issue.
 
 First, we would really appreciate it if you could **make sure the bug was not
@@ -93,7 +119,7 @@ folder.
 
 ## Start contributing! (Pull Requests)
 
-Before writing code, we strongly advise you to search through the exising PRs or
+Before writing code, we strongly advise you to search through the existing PRs or
 issues to make sure that nobody is already working on the same thing. If you are
 unsure, it is always a good idea to open an issue to get some feedback.
 
@@ -122,7 +148,7 @@ Follow these steps to start contributing:
    $ git checkout -b a-descriptive-name-for-my-changes
    ```
 
-   **do not** work on the `master` branch.
+   **Do not** work on the `master` branch.
 
 4. Set up a development environment by running the following command in a virtual environment:
 
@@ -170,12 +196,19 @@ Follow these steps to start contributing:
    $ make style
    ```
 
-   `transformers` also uses `flake8` to check for coding mistakes. Quality
+   `transformers` also uses `flake8` and a few custom scripts to check for coding mistakes. Quality
    control runs in CI, however you can also run the same checks with:
 
    ```bash
    $ make quality
    ```
+   You can do the automatic style corrections and code verifications that can't be automated in one go:
+
+   ```bash
+   $ make fixup
+   ```
+
+   This target is also optimized to only work with files modified by the PR you're working on.
 
    If you're modifying documents under `docs/source`, make sure to validate that
    they can still be built. This check also runs in CI. To run a local check
@@ -225,7 +258,7 @@ Follow these steps to start contributing:
 ### Checklist
 
 1. The title of your pull request should be a summary of its contribution;
-2. If your pull request adresses an issue, please mention the issue number in
+2. If your pull request addresses an issue, please mention the issue number in
    the pull request description to make sure they are linked (and people
    consulting the issue know you are working on it);
 3. To indicate a work in progress please prefix the title with `[WIP]`. These
@@ -259,7 +292,7 @@ $ python -m pytest -n auto --dist=loadfile -s -v ./tests/
 and for the examples:
 
 ```bash
-$ pip install -r examples/requirements.txt  # only needed the first time
+$ pip install -r examples/xxx/requirements.txt  # only needed the first time
 $ python -m pytest -n auto --dist=loadfile -s -v ./examples/
 ```
 In fact, that's how `make test` and `make test-examples` are implemented (sans the `pip install` line)!
@@ -298,3 +331,32 @@ Check our [documentation writing guide](https://github.com/huggingface/transform
 for more information.
 
 #### This guide was heavily inspired by the awesome [scikit-learn guide to contributing](https://github.com/scikit-learn/scikit-learn/blob/master/CONTRIBUTING.md)
+
+
+### Develop on Windows
+
+On windows, you need to configure git to transform Windows `CRLF` line endings to Linux `LF` line endings:
+
+`git config core.autocrlf input`
+
+One way one can run the make command on Window is to pass by MSYS2:
+
+1. [Download MSYS2](https://www.msys2.org/), we assume to have it installed in C:\msys64
+2. Open the command line C:\msys64\msys2.exe (it should be available from the start menu)
+3. Run in the shell: `pacman -Syu` and install make with `pacman -S make`
+4. Add `C:\msys64\usr\bin` to your PATH environment variable.
+
+You can now use `make` from any terminal (Powershell, cmd.exe, etc) 🎉
+
+### Syncing forked master with upstream (HuggingFace) master
+
+To avoid pinging the upstream repository which adds reference notes to each upstream PR and sends unnessary notifications to the developers involved in these PRs,
+when syncing the master branch of a forked repository, please, follow these steps:
+1. When possible, avoid syncing with the upstream using a branch and PR on the forked repository. Instead merge directly into the forked master.
+2. If a PR is absolutely necessary, use the following steps after checking out your branch:
+```
+$ git checkout -b your-branch-for-syncing
+$ git pull --squash --no-commit upstream master
+$ git commit -m '<your message without GitHub references>'
+$ git push --set-upstream origin your-branch-for-syncing
+```

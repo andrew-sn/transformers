@@ -1,11 +1,22 @@
 // These two things need to be updated at each release for the version selector.
 // Last stable version
-const stableVersion = "v3.1.0"
-// Dictionary doc folder to label
+const stableVersion = "v4.6.0"
+// Dictionary doc folder to label. The last stable version should have an empty key.
 const versionMapping = {
     "master": "master",
-    "": "v3.1.0 (stable)",
-    "v3.0.2": "v3.0.0/v3.0.1/v3.0.2 (stable)",
+    "": "v4.6.0 (stable)",
+    "v4.5.1": "v4.5.0/v4.5.1",
+    "v4.4.2": "v4.4.0/v4.4.1/v4.4.2",
+    "v4.3.3": "v4.3.0/v4.3.1/v4.3.2/v4.3.3",
+    "v4.2.2": "v4.2.0/v4.2.1/v4.2.2",
+    "v4.1.1": "v4.1.0/v4.1.1",
+    "v4.0.1": "v4.0.0/v4.0.1",
+    "v3.5.1": "v3.5.0/v3.5.1",
+    "v3.4.0": "v3.4.0",
+    "v3.3.1": "v3.3.0/v3.3.1",
+    "v3.2.0": "v3.2.0",
+    "v3.1.0": "v3.1.0",
+    "v3.0.2": "v3.0.0/v3.0.1/v3.0.2",
     "v2.11.0": "v2.11.0",
     "v2.10.0": "v2.10.0",
     "v2.9.1": "v2.9.0/v2.9.1",
@@ -53,7 +64,7 @@ function addIcon() {
 function addCustomFooter() {
     const customFooter = document.createElement("div");
     const questionOrIssue = document.createElement("div");
-    questionOrIssue.innerHTML = "Stuck? Read our <a href='https://medium.com/huggingface'>Blog posts</a> or <a href='https://github.com/huggingface/transformers'>Create an issue</a>";
+    questionOrIssue.innerHTML = "Stuck? Read our <a href='https://huggingface.co/blog'>Blog posts</a> or <a href='https://github.com/huggingface/transformers'>Create an issue</a>";
     customFooter.appendChild(questionOrIssue);
     customFooter.classList.add("footer");
 
@@ -120,11 +131,11 @@ function addVersionControl() {
     const parts = location.toString().split('/');
     let versionIndex = parts.length - 2;
     // Index page may not have a last part with filename.html so we need to go up
-    if (parts[parts.length - 1] != "" && ! parts[parts.length - 1].match(/\.html$|^search.html?/)) {
+    if (parts[parts.length - 1] != "" && ! parts[parts.length - 1].match(/\.html/)) {
         versionIndex = parts.length - 1;
     }
     // Main classes and models are nested so we need to go deeper
-    else if (parts[versionIndex] == "main_classes" || parts[versionIndex] == "model_doc") {
+    else if (parts[versionIndex] == "main_classes" || parts[versionIndex] == "model_doc" || parts[versionIndex] == "internal") {
         versionIndex = versionIndex - 1;
     } 
     const version = parts[versionIndex];
@@ -234,9 +245,11 @@ function platformToggle() {
 
     const createFrameworkButtons = sample => {
             const pytorchButton = document.createElement("button");
+            pytorchButton.classList.add('pytorch-button')
             pytorchButton.innerText = "PyTorch";
 
             const tensorflowButton = document.createElement("button");
+            tensorflowButton.classList.add('tensorflow-button')
             tensorflowButton.innerText = "TensorFlow";
 
             const selectorDiv = document.createElement("div");
@@ -251,22 +264,36 @@ function platformToggle() {
             tensorflowButton.classList.remove("selected");
 
             pytorchButton.addEventListener("click", () => {
-                sample.element.innerHTML = sample.pytorchSample;
-                pytorchButton.classList.add("selected");
-                tensorflowButton.classList.remove("selected");
+                for(const codeBlock of updatedCodeBlocks){
+                    codeBlock.element.innerHTML = codeBlock.pytorchSample;
+                }
+                Array.from(document.getElementsByClassName('pytorch-button')).forEach(button => {
+                    button.classList.add("selected");
+                })
+                Array.from(document.getElementsByClassName('tensorflow-button')).forEach(button => {
+                    button.classList.remove("selected");
+                })
             });
             tensorflowButton.addEventListener("click", () => {
-               sample.element.innerHTML = sample.tensorflowSample;
-                tensorflowButton.classList.add("selected");
-                pytorchButton.classList.remove("selected");
+                for(const codeBlock of updatedCodeBlocks){
+                    codeBlock.element.innerHTML = codeBlock.tensorflowSample;
+                }
+                Array.from(document.getElementsByClassName('tensorflow-button')).forEach(button => {
+                    button.classList.add("selected");
+                })
+                Array.from(document.getElementsByClassName('pytorch-button')).forEach(button => {
+                    button.classList.remove("selected");
+                })
             });
         };
 
-    codeBlocks
+    const updatedCodeBlocks = codeBlocks
         .map(element => {return {element: element.firstChild, innerText: element.innerText}})
         .filter(codeBlock => codeBlock.innerText.includes(pytorchIdentifier) && codeBlock.innerText.includes(tensorflowIdentifier))
         .map(getFrameworkSpans)
-        .forEach(createFrameworkButtons);
+
+    updatedCodeBlocks
+        .forEach(createFrameworkButtons)
 }
 
 
