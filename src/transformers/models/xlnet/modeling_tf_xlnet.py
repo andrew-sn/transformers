@@ -119,7 +119,7 @@ class TFXLNetRelativeAttention(tf.keras.layers.Layer):
 
     def rel_shift(self, x, klen=-1):
         """perform relative shift to form the relative attention score."""
-        x_size = shape_list(x)
+        x_size = shape_list(x)  # [q_len, k_len+q_len, bsz, num_heads]
 
         x = tf.reshape(x, (x_size[1], x_size[0], x_size[2], x_size[3]))
         x = x[1:, ...]
@@ -132,25 +132,43 @@ class TFXLNetRelativeAttention(tf.keras.layers.Layer):
     def rel_attn_core(
         self, q_head, k_head_h, v_head_h, k_head_r, seg_mat, attn_mask, head_mask, output_attentions, training=False
     ):
-        """Core relative positional attention operations."""
+        """Core relative positional attention operations.
+        q_head: [q_len, bsz, num_heads, head_hidden]
+        k_head_h: [k_len, bsz, num_heads, head_hidden]
+        v_head_h: [v_len, bsz, num_heads, head_hidden]
+        k_head_r: [q_len+k_len, bsz, num_heads, head_hidden]
+        seg_mat: [q_len, k_len, bsz, 2]
+        attn_mask: [q_len, k_len, bsz, 1]
+        """
         # content based attention score
+        # ([q_len, bsz, num_heads, head_hidden]+[num_heads, head_hidden])*[k_len, bsz, num_heads, head_hidden]-->
+        # [q_len, k_len, bsz, num_heads]
         ac = tf.einsum("ibnd,jbnd->ijbn", q_head + self.r_w_bias, k_head_h)
 
         # position based attention score
+        # ([q_len, bsz, num_heads, head_hidden]+[num_heads, head_hidden])*[k_len+q_len, bsz, num_heads, head_hidden]-->
+        # [q_len, k_len+q_len, bsz, num_heads]
+        # 相对位置编码最关键的就是 k_head_r 是固定的
         bd = tf.einsum("ibnd,jbnd->ijbn", q_head + self.r_r_bias, k_head_r)
+        # [q_len, k_len+q_len, bsz, num_heads]-->[q_len, k_len, bsz, num_heads]
         bd = self.rel_shift(bd, klen=shape_list(ac)[1])
 
         # segment based attention score
         if seg_mat is None:
             ef = 0
         else:
+            # ([q_len, bsz, num_heads, head_hidden]+[num_heads, head_hidden])*[2, q_len, k_len]-->
+            # [q_len, bsz, num_heads, 2]
             ef = tf.einsum("ibnd,snd->ibns", q_head + self.r_s_bias, self.seg_embed)
+            seg_mat = tf.cast(seg_mat, tf.float16)
+            # [q_len, k_len, bsz, 2]*[q_len, bsz, num_heads, 2]-->[q_len, k_len, bsz, num_heads]
             ef = tf.einsum("ijbs,ibns->ijbn", seg_mat, ef)
 
         # merge attention scores and perform masking
         attn_score = (ac + bd + ef) * self.scale
         if attn_mask is not None:
             # attn_score = attn_score * (1 - attn_mask) - 1e30 * attn_mask
+            attn_mask = tf.cast(attn_mask, tf.float16)
             if attn_mask.dtype == tf.float16 or attn_mask.dtype == tf.bfloat16:
                 attn_score = attn_score - 65500 * attn_mask
             else:
@@ -190,9 +208,9 @@ class TFXLNetRelativeAttention(tf.keras.layers.Layer):
         self,
         h,
         g,
-        attn_mask_h,
-        attn_mask_g,
-        r,
+        attn_mask_h,  # non_tgt_mask
+        attn_mask_g,  # attn_mask 没有用到
+        r,  # pos_emb [klen+qlen, bsz, hidden_size]
         seg_mat,
         mems,
         target_mapping,
@@ -215,7 +233,9 @@ class TFXLNetRelativeAttention(tf.keras.layers.Layer):
             v_head_h = tf.einsum("ibh,hnd->ibnd", cat, self.v)
 
             # position-based key head
-            k_head_r = tf.einsum("ibh,hnd->ibnd", r, self.r)
+            # 这里的i表示所有的相对位置 k_head_r第一个纬度有明确的物理含义
+            # k_head_r[:, 0, 0, 0] == k_head_r[:, 1, 0, 0] 即batch内所有数据 在 同一个attend头上的 相对位置编码是一样的
+            k_head_r = tf.einsum("ibh,hnd->ibnd", r, self.r)  # pos_emb 代表一共有352种位置差
 
             # h-stream
             # content-stream query head
@@ -226,7 +246,7 @@ class TFXLNetRelativeAttention(tf.keras.layers.Layer):
                 q_head_h,
                 k_head_h,
                 v_head_h,
-                k_head_r,
+                k_head_r,  # 包含了所有可能的相对位置
                 seg_mat,
                 attn_mask_h,
                 head_mask,
@@ -246,6 +266,7 @@ class TFXLNetRelativeAttention(tf.keras.layers.Layer):
 
             # core attention ops
             if target_mapping is not None:
+                target_mapping = tf.cast(target_mapping, q_head_g.dtype)
                 q_head_g = tf.einsum("mbnd,mlb->lbnd", q_head_g, target_mapping)
                 attn_vec_g = self.rel_attn_core(
                     q_head_g,
@@ -263,7 +284,7 @@ class TFXLNetRelativeAttention(tf.keras.layers.Layer):
                     attn_vec_g, attn_prob_g = attn_vec_g
 
                 attn_vec_g = tf.einsum("lbnd,mlb->mbnd", attn_vec_g, target_mapping)
-            else:
+            else:  # TODO...
                 attn_vec_g = self.rel_attn_core(
                     q_head_g,
                     k_head_h,
@@ -290,24 +311,24 @@ class TFXLNetRelativeAttention(tf.keras.layers.Layer):
             if mems is not None and len(shape_list(mems)) > 1:
                 cat = tf.concat([mems, h], axis=0)
             else:
-                cat = h
+                cat = h  # [seq_len, batch_size, hidden_size]
 
             # content heads
-            q_head_h = tf.einsum("ibh,hnd->ibnd", h, self.q)
-            k_head_h = tf.einsum("ibh,hnd->ibnd", cat, self.k)
+            q_head_h = tf.einsum("ibh,hnd->ibnd", h, self.q)  # [seq_len, bsz, hidden_size]*[hidden_size, num_heads, hidden_size_per_head]-->[seq_len, bsz, num_heads, hidden_size_per_head]
+            k_head_h = tf.einsum("ibh,hnd->ibnd", cat, self.k)  # [seq_len, batch_size, hidden_size]*[hidden_size, num_heads, hidden_size_per_head]
             v_head_h = tf.einsum("ibh,hnd->ibnd", cat, self.v)
 
             # positional heads
-            k_head_r = tf.einsum("ibh,hnd->ibnd", r, self.r)
+            k_head_r = tf.einsum("ibh,hnd->ibnd", r, self.r)  # [klen+qlen, bsz, hidden_size]*[hidden_size, num_heads, hidden_size_per_head]
 
             # core attention ops
             attn_vec = self.rel_attn_core(
-                q_head_h,
-                k_head_h,
-                v_head_h,
-                k_head_r,
-                seg_mat,
-                attn_mask_h,
+                q_head_h,  # [seq_len, bsz, num_heads, hidden_of_head]
+                k_head_h,  # [seq_len, bsz, num_heads, hidden_of_head]
+                v_head_h,  # [seq_len, bsz, num_heads, hidden_of_head]
+                k_head_r,  # [qlen+klen, bsz, num_heads, hidden_of_head]
+                seg_mat,  # [seq_len, seq_len, bse, 2]
+                attn_mask_h,  # [seq_len, seq_len, bsz, 1]
                 head_mask,
                 output_attentions,
                 training=training,
@@ -375,8 +396,8 @@ class TFXLNetLayer(tf.keras.layers.Layer):
         training=False,
     ):
         outputs = self.rel_attn(
-            output_h,
-            output_g,
+            output_h,  # content_stream
+            output_g,  # query_stream
             non_tgt_mask,
             attn_mask,
             pos_emb,
@@ -442,9 +463,9 @@ class TFXLNetMainLayer(tf.keras.layers.Layer):
         self.return_dict = config.return_dict
 
         self.mem_len = config.mem_len
-        self.reuse_len = config.reuse_len
+        self.reuse_len = config.reuse_len  # TODO...
         self.d_model = config.d_model
-        self.same_length = config.same_length
+        self.same_length = config.same_length  # TODO...
         self.attn_type = config.attn_type
         self.bi_data = config.bi_data
         self.clamp_len = config.clamp_len
@@ -497,19 +518,19 @@ class TFXLNetMainLayer(tf.keras.layers.Layer):
 
         """
         attn_mask = tf.ones([qlen, qlen])
-        mask_u = tf.matrix_band_part(attn_mask, 0, -1)
-        mask_dia = tf.matrix_band_part(attn_mask, 0, 0)
+        mask_u = tf.matrix_band_part(attn_mask, 0, -1)  # 上三角矩阵  tf.linalg.band_part
+        mask_dia = tf.matrix_band_part(attn_mask, 0, 0)  # 对角线矩阵
         attn_mask_pad = tf.zeros([qlen, mlen])
         ret = tf.concat([attn_mask_pad, mask_u - mask_dia], 1)
         if self.same_length:
-            mask_l = tf.matrix_band_part(attn_mask, -1, 0)
+            mask_l = tf.matrix_band_part(attn_mask, -1, 0)  # 下三角矩阵
             ret = tf.concat([ret[:, :qlen] + mask_l - mask_dia, ret[:, qlen:]], 1)
         return ret
 
-    def cache_mem(self, curr_out, prev_mem):
+    def cache_mem(self, curr_out, prev_mem):  # curr_out: [seq, bsz, hidden]
         # cache hidden states into memory.
         if self.reuse_len is not None and self.reuse_len > 0:
-            curr_out = curr_out[: self.reuse_len]
+            curr_out = curr_out[: self.reuse_len]  # 将reuse的部分cache起来
 
         if self.mem_len is None or self.mem_len == 0:
             # If :obj:`use_mems` is active but no `mem_len` is defined, the model behaves like GPT-2 at inference time
@@ -524,26 +545,25 @@ class TFXLNetMainLayer(tf.keras.layers.Layer):
             new_mem = curr_out[cutoff:]
         else:
             new_mem = tf.concat([prev_mem, curr_out], 0)[cutoff:]
-
         return tf.stop_gradient(new_mem)
 
     @staticmethod
     def positional_embedding(pos_seq, inv_freq, bsz=None):
-        sinusoid_inp = tf.einsum("i,d->id", pos_seq, inv_freq)
-        pos_emb = tf.concat([tf.sin(sinusoid_inp), tf.cos(sinusoid_inp)], axis=-1)
-        pos_emb = pos_emb[:, None, :]
+        sinusoid_inp = tf.einsum("i,d->id", pos_seq, inv_freq)  # [klen+qlen]*[hidden_size//2]-->[klen+qlen, hidden_size//2]
+        pos_emb = tf.concat([tf.sin(sinusoid_inp), tf.cos(sinusoid_inp)], axis=-1)  # [klen+qlen, hidden_size]
+        pos_emb = pos_emb[:, None, :]  # [klen+qlen, 1, hidden_size]
 
         if bsz is not None:
-            pos_emb = tf.tile(pos_emb, [1, bsz, 1])
+            pos_emb = tf.tile(pos_emb, [1, bsz, 1])  # [klen+qlen, bsz, hidden_size]
 
-        return pos_emb
+        return pos_emb  # [klen+qlen, bsz, hidden_size]
 
     def relative_positional_encoding(self, qlen, klen, bsz=None):
         """create relative positional encoding."""
-        freq_seq = tf.range(0, self.d_model, 2.0)
-        inv_freq = 1 / (10000 ** (freq_seq / self.d_model))
+        freq_seq = tf.range(0, self.d_model, 2.0)  # 线性增长
+        inv_freq = 1 / (10000 ** (freq_seq / self.d_model))  # 1/指数增长 （周期）
 
-        if self.attn_type == "bi":
+        if self.attn_type == "bi":  # pretrain/finetune
             # beg, end = klen - 1, -qlen
             beg, end = klen, -qlen
         elif self.attn_type == "uni":
@@ -552,30 +572,33 @@ class TFXLNetMainLayer(tf.keras.layers.Layer):
         else:
             raise ValueError(f"Unknown `attn_type` {self.attn_type}.")
 
-        if self.bi_data:
-            fwd_pos_seq = tf.range(beg, end, -1.0)
-            bwd_pos_seq = tf.range(-beg, -end, 1.0)
+        if self.bi_data:  # pretrain
+            # 正向数据 i-j的数值 [往前attend的最大距离, 往后attend的最大距离] fwd_pos_seq中的数字 表示 相对位置
+            fwd_pos_seq = tf.range(beg, end, -1.0)  # [224, -127]  假设mem=96 seq=128  shape=[352]
+            # 反向数据 i-j的数据 [往前attend的最大距离, 往后attend的最大距离]
+            bwd_pos_seq = tf.range(-beg, -end, 1.0)  # [-224, 127]  shape=[352]
 
-            if self.clamp_len > 0:
+            if self.clamp_len > 0:  # 将两个词的最大距离限制在-clamp_len与clamp_len之间 这里不做限制
                 fwd_pos_seq = tf.clip_by_value(fwd_pos_seq, -self.clamp_len, self.clamp_len)
                 bwd_pos_seq = tf.clip_by_value(bwd_pos_seq, -self.clamp_len, self.clamp_len)
 
             if bsz is not None:
                 assert bsz % 2 == 0, f"With bi_data, the batch size {bsz} should be divisible by 2"
-                fwd_pos_emb = self.positional_embedding(fwd_pos_seq, inv_freq, bsz // 2)
-                bwd_pos_emb = self.positional_embedding(bwd_pos_seq, inv_freq, bsz // 2)
+                # [352, 4, 1024]  4==bsz//2
+                fwd_pos_emb = self.positional_embedding(fwd_pos_seq, inv_freq, bsz // 2)  # 代表[224, -127]的前向相对位置
+                bwd_pos_emb = self.positional_embedding(bwd_pos_seq, inv_freq, bsz // 2)  # 代表[-224, 127]的后向相对位置
             else:
                 fwd_pos_emb = self.positional_embedding(fwd_pos_seq, inv_freq)
                 bwd_pos_emb = self.positional_embedding(bwd_pos_seq, inv_freq)
-
+            # [352, 8, 1024]  8==bsz
             pos_emb = tf.concat([fwd_pos_emb, bwd_pos_emb], axis=1)
-        else:
-            fwd_pos_seq = tf.range(beg, end, -1.0)
-            if self.clamp_len > 0:
+        else:  # classification
+            fwd_pos_seq = tf.range(beg, end, -1.0)  # TODO...为什么要倒序
+            if self.clamp_len > 0:  # 默认无
                 fwd_pos_seq = tf.clip_by_value(fwd_pos_seq, -self.clamp_len, self.clamp_len)
             pos_emb = self.positional_embedding(fwd_pos_seq, inv_freq, bsz)
-
-        return pos_emb
+        # 第一纬度是有明确的相对位置含义的 与fwd_pos_seq&bwd_pos_seq的定义相关
+        return pos_emb  # [klen+qlen, bsz, hidden_size] TODO...为什么是klen+qlen
 
     def call(
         self,
@@ -659,23 +682,23 @@ class TFXLNetMainLayer(tf.keras.layers.Layer):
         if self.attn_type == "uni":
             attn_mask = self.create_mask(qlen, mlen)
             attn_mask = attn_mask[:, :, None, None]
-        elif self.attn_type == "bi":
+        elif self.attn_type == "bi":  # pretrain/finetune
             attn_mask = None
         else:
             raise ValueError(f"Unsupported attention type: {self.attn_type}")
 
-        # data mask: input mask & perm mask
+        # data mask: input mask & perm mask  # 为什么 没有Padding
         assert inputs["input_mask"] is None or inputs["attention_mask"] is None, (
             "You can only use one of input_mask (uses 1 for padding) "
             "or attention_mask (uses 0 for padding, added for compatibility with BERT). Please choose one."
         )
-        if inputs["input_mask"] is None and inputs["attention_mask"] is not None:
+        if inputs["input_mask"] is None and inputs["attention_mask"] is not None:  # 将attention_mask赋值给input_mask
             one_cst = tf.constant(1.0)
             inputs["input_mask"] = 1.0 - tf.cast(inputs["attention_mask"], dtype=one_cst.dtype)
-        if inputs["input_mask"] is not None and inputs["perm_mask"] is not None:
-            data_mask = inputs["input_mask"][None] + inputs["perm_mask"]
-        elif inputs["input_mask"] is not None and inputs["perm_mask"] is None:
-            data_mask = inputs["input_mask"][None]
+        if inputs["input_mask"] is not None and inputs["perm_mask"] is not None:  # pretrain
+            data_mask = inputs["input_mask"][None] + inputs["perm_mask"]  # ([seq, bsz]-->[1, seq, bsz])+[seq, seq, bsz]-->[seq, seq, bsz]
+        elif inputs["input_mask"] is not None and inputs["perm_mask"] is None:  # 下游任务
+            data_mask = inputs["input_mask"][None]  # [seq_len, bsz]-->[1, seq_len, bsz]
         elif inputs["input_mask"] is None and inputs["perm_mask"] is not None:
             data_mask = inputs["perm_mask"]
         else:
@@ -683,21 +706,22 @@ class TFXLNetMainLayer(tf.keras.layers.Layer):
 
         if data_mask is not None:
             # all mems can be attended to
-            if mlen > 0:
-                mems_mask = tf.zeros([shape_list(data_mask)[0], mlen, bsz])
-                data_mask = tf.concat([mems_mask, data_mask], axis=1)
-            if attn_mask is None:
-                attn_mask = data_mask[:, :, :, None]
+            if mlen > 0:  # 默认finetune时 mlen=0
+                mems_mask = tf.zeros([shape_list(data_mask)[0], mlen, bsz])  # [seq, mem, bsz]
+                data_mask = tf.concat([mems_mask, data_mask], axis=1)  # [seq, mem, bsz]+[seq, seq, bsz]-->[seq, mem+seq, bsz]
+            if attn_mask is None:  # pretrain/finetune
+                attn_mask = data_mask[:, :, :, None]  # [seq, mem+seq, bsz]-->[seq, mem+seq, bsz, 1]
             else:
                 attn_mask += data_mask[:, :, :, None]
 
-        if attn_mask is not None:
+        if attn_mask is not None:  # attn_mask有可能>1 0&1
             attn_mask = tf.cast(attn_mask > 0, dtype=attn_mask.dtype)
 
-        if attn_mask is not None:
-            non_tgt_mask = -tf.eye(qlen)
-            if mlen > 0:
-                non_tgt_mask = tf.concat([tf.zeros([qlen, mlen]), non_tgt_mask], axis=-1)
+        if attn_mask is not None:  # attn_mask 0 表示 可以attn
+            non_tgt_mask = -tf.eye(qlen)  # 对角线矩阵 -1
+            if mlen > 0:  # ([qlen, mlen]+[qlen, qlen])-->[qlen, meln+qlen]
+                non_tgt_mask = tf.concat([tf.zeros([qlen, mlen]), non_tgt_mask], axis=-1)  # 0&-1
+            # [seq, mem+seq, bsz, 1]+[qlen, mlen+qlen, 1, 1]-->[qlen, mem+seq, bsz, 1]  0&1
             non_tgt_mask = tf.cast((attn_mask + non_tgt_mask[:, :, None, None]) > 0, dtype=non_tgt_mask.dtype)
         else:
             non_tgt_mask = None
@@ -705,38 +729,42 @@ class TFXLNetMainLayer(tf.keras.layers.Layer):
         # Word embeddings and prepare h & g hidden states
         if inputs["inputs_embeds"] is not None:
             word_emb_k = inputs["inputs_embeds"]
-        else:
+        else:  # 只有word信息
             word_emb_k = self.word_embedding(inputs["input_ids"])
-        output_h = self.dropout(word_emb_k, training=inputs["training"])
-        if inputs["target_mapping"] is not None:
-            word_emb_q = tf.tile(self.mask_emb, [shape_list(inputs["target_mapping"])[0], bsz, 1])
-            # else:  # We removed the inp_q input which was same as target mapping
+        output_h = self.dropout(word_emb_k, training=inputs["training"])  # 初始化content_stream
+        if inputs["target_mapping"] is not None:  # pretrain
+            # [1, 1, d_model]-->[num_predict, bsz, d_model] 只计算mask位置的query_stream
+            word_emb_q = tf.tile(self.mask_emb, [shape_list(inputs["target_mapping"])[0], bsz, 1])  # [num_to_predict, bsz, hidden_size]
+            # else:  # We removed the inp_q input which was same as target mapping 所有的词都要预测
+            #     [seq, bsz]-->[seq, bsz, 1]
             #     inp_q_ext = inp_q[:, :, None]
+            #     {([seq, bsz, 1]*[1, 1, d_model]-->[seq, bsz, d_model]) + (1-[seq, bsz, 1])*[seq, bsz, d_model]}-->
+            #     [seq, bsz, d_model]
             #     word_emb_q = inp_q_ext * self.mask_emb + (1 - inp_q_ext) * word_emb_k
             output_g = self.dropout(word_emb_q, training=inputs["training"])
-        else:
+        else:  # finetune
             output_g = None
 
         # Segment embedding
         if inputs["token_type_ids"] is not None:
             # Convert `token_type_ids` to one-hot `seg_mat`
-            if mlen > 0:
+            if mlen > 0:  # memory是用0表示的 TODO...为什么mem是用0表示的  mem+reuse+a+b
                 mem_pad = tf.zeros([mlen, bsz], dtype=inputs["token_type_ids"].dtype)
-                cat_ids = tf.concat([mem_pad, inputs["token_type_ids"]], 0)
+                cat_ids = tf.concat([mem_pad, inputs["token_type_ids"]], 0)  # [mem, bsz]+[seq, bsz]-->[mem+seq, bsz]
             else:
                 cat_ids = inputs["token_type_ids"]
 
             # `1` indicates not in the same segment [qlen x klen x bsz]
-            seg_mat = tf.cast(
+            seg_mat = tf.cast(  # ([qlen, bsz]-->[qlen, 1, bsz])==([mem+seq, bsz]-->[1, mem+seq, bsz])-->[qlen, mem+seq, bsz]
                 tf.logical_not(tf.equal(inputs["token_type_ids"][:, None], cat_ids[None, :])),
                 dtype=inputs["token_type_ids"].dtype,
             )
-            seg_mat = tf.one_hot(seg_mat, 2)
+            seg_mat = tf.one_hot(seg_mat, 2)  # [qlen, mem+seq, bsz]-->[qlen, mem+seq, bsz, 2]
         else:
             seg_mat = None
 
         # Positional encoding
-        pos_emb = self.relative_positional_encoding(qlen, klen, bsz=bsz)
+        pos_emb = self.relative_positional_encoding(qlen, klen, bsz=bsz)  # [klen+qlen, bsz, hidden_size]
         pos_emb = self.dropout(pos_emb, training=inputs["training"])
 
         # Prepare head mask if needed
@@ -757,22 +785,22 @@ class TFXLNetMainLayer(tf.keras.layers.Layer):
         hidden_states = [] if inputs["output_hidden_states"] else None
         for i, layer_module in enumerate(self.layer):
             # cache new mems
-            if inputs["use_mems"]:
+            if inputs["use_mems"]:  # pretrain
                 new_mems = new_mems + (self.cache_mem(output_h, inputs["mems"][i]),)
-            if inputs["output_hidden_states"]:
+            if inputs["output_hidden_states"]:  # finetune阶段暂时用不着
                 hidden_states.append((output_h, output_g) if output_g is not None else output_h)
 
             outputs = layer_module(
-                output_h,
-                output_g,
-                non_tgt_mask,
-                attn_mask,
-                pos_emb,
-                seg_mat,
-                inputs["mems"][i],
-                inputs["target_mapping"],
-                inputs["head_mask"][i],
-                inputs["output_attentions"],
+                output_h,  # [seq_len, bsz, hidden_size]  词信息
+                output_g,  # TODO... query_stream
+                non_tgt_mask,  # [qlen, klen, bsz, 1] TODO... h_mask
+                attn_mask,  # [1, qlne, bsz, 1]  TODO... g_mask 在classification中没有用到
+                pos_emb,  # [klen+qlen, bsz, hidden_size]  TODO...
+                seg_mat,  # [qlen, klen, bsz, 2]  TODO...
+                inputs["mems"][i],  # None
+                inputs["target_mapping"],  # None
+                inputs["head_mask"][i],  # None
+                inputs["output_attentions"],  # False
                 training=inputs["training"],
             )
             output_h, output_g = outputs[:2]

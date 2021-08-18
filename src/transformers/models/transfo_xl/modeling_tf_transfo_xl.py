@@ -122,8 +122,8 @@ class TFRelPartialLearnableMultiHeadAttn(tf.keras.layers.Layer):
         dropout,
         dropatt=0.0,
         pre_lnorm=False,
-        r_r_bias=None,
-        r_w_bias=None,
+        r_r_bias=None,  # 公式中的v
+        r_w_bias=None,  # 公式中的u
         layer_norm_epsilon=1e-5,
         init_std=0.02,
         output_attentions=False,
@@ -154,8 +154,8 @@ class TFRelPartialLearnableMultiHeadAttn(tf.keras.layers.Layer):
         self.pre_lnorm = pre_lnorm
 
         if r_r_bias is not None and r_w_bias is not None:  # Biases are shared
-            self.r_r_bias = r_r_bias
-            self.r_w_bias = r_w_bias
+            self.r_r_bias = r_r_bias  # u
+            self.r_w_bias = r_w_bias  # v
         else:
             self.r_r_bias = None
             self.r_w_bias = None
@@ -634,8 +634,8 @@ class TFTransfoXLMainLayer(tf.keras.layers.Layer):
                 hids.append(core_out)
                 mems_i = None if inputs["mems"] is None else inputs["mems"][i]
                 layer_outputs = layer(
-                    core_out,
-                    pos_emb,
+                    core_out,  # 词向量
+                    pos_emb,  # 位置向量
                     dec_attn_mask,
                     mems_i,
                     inputs["head_mask"][i],

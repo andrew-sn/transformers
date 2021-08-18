@@ -106,19 +106,19 @@ class TFBertPreTrainingLoss:
         )
         # make sure only labels that are not equal to -100
         # are taken into account as loss
-        masked_lm_active_loss = tf.not_equal(tf.reshape(tensor=labels["labels"], shape=(-1,)), -100)
-        masked_lm_reduced_logits = tf.boolean_mask(
+        masked_lm_active_loss = tf.not_equal(tf.reshape(tensor=labels["labels"], shape=(-1,)), -100)  # [B, S]-->[B*S]
+        masked_lm_reduced_logits = tf.boolean_mask(  # ([B, S, W]-->[B*S, W])&[B*S]-->[B*P, W]
             tensor=tf.reshape(tensor=logits[0], shape=(-1, shape_list(logits[0])[2])),
             mask=masked_lm_active_loss,
         )
-        masked_lm_labels = tf.boolean_mask(
+        masked_lm_labels = tf.boolean_mask(  # ([B, S]-->[B*S])&[B*S]-->[B*P]
             tensor=tf.reshape(tensor=labels["labels"], shape=(-1,)), mask=masked_lm_active_loss
         )
-        next_sentence_active_loss = tf.not_equal(tf.reshape(tensor=labels["next_sentence_label"], shape=(-1,)), -100)
-        next_sentence_reduced_logits = tf.boolean_mask(
+        next_sentence_active_loss = tf.not_equal(tf.reshape(tensor=labels["next_sentence_label"], shape=(-1,)), -100)  # [B, 2]-->[B*2]
+        next_sentence_reduced_logits = tf.boolean_mask(  # ([B, 2]-->[B, 2])&[B*2]-->[]
             tensor=tf.reshape(tensor=logits[1], shape=(-1, 2)), mask=next_sentence_active_loss
         )
-        next_sentence_label = tf.boolean_mask(
+        next_sentence_label = tf.boolean_mask(  # [B, 2]-->[B*2]
             tensor=tf.reshape(tensor=labels["next_sentence_label"], shape=(-1,)), mask=next_sentence_active_loss
         )
         masked_lm_loss = loss_fn(y_true=masked_lm_labels, y_pred=masked_lm_reduced_logits)
@@ -195,7 +195,7 @@ class TFBertEmbeddings(tf.keras.layers.Layer):
         if position_ids is None:
             position_ids = tf.expand_dims(tf.range(start=0, limit=input_shape[-1]), axis=0)
 
-        position_embeds = tf.gather(params=self.position_embeddings, indices=position_ids)
+        position_embeds = tf.gather(params=self.position_embeddings, indices=position_ids)  # [B, S, H]
         position_embeds = tf.tile(input=position_embeds, multiples=(input_shape[0], 1, 1))
         token_type_embeds = tf.gather(params=self.token_type_embeddings, indices=token_type_ids)
         final_embeddings = self.embeddings_sum(inputs=[inputs_embeds, position_embeds, token_type_embeds])
