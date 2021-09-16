@@ -27,7 +27,7 @@ import random
 import datasets
 import torch
 from datasets import ClassLabel, load_dataset, load_metric
-from torch.utils.data.dataloader import DataLoader
+from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 import transformers
@@ -45,9 +45,12 @@ from transformers import (
     get_scheduler,
     set_seed,
 )
+from transformers.utils.versions import require_version
 
 
 logger = logging.getLogger(__name__)
+require_version("datasets>=1.8.0", "To fix: pip install -r examples/pytorch/token-classification/requirements.txt")
+
 # You should update this to your particular problem to have better documentation of `model_type`
 MODEL_CONFIG_CLASSES = list(MODEL_MAPPING.keys())
 MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
@@ -218,7 +221,7 @@ def main():
     accelerator = Accelerator()
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
         datefmt="%m/%d/%Y %H:%M:%S",
         level=logging.INFO,
     )
@@ -317,15 +320,17 @@ def main():
         config = CONFIG_MAPPING[args.model_type]()
         logger.warning("You are instantiating a new config instance from scratch.")
 
-    if args.tokenizer_name:
-        tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name, use_fast=True)
-    elif args.model_name_or_path:
-        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=True)
-    else:
+    tokenizer_name_or_path = args.tokenizer_name if args.tokenizer_name else args.model_name_or_path
+    if not tokenizer_name_or_path:
         raise ValueError(
             "You are instantiating a new tokenizer from scratch. This is not supported by this script."
             "You can do it from another script, save it, and load it from here, using --tokenizer_name."
         )
+
+    if config.model_type in {"gpt2", "roberta"}:
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path, use_fast=True, add_prefix_space=True)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path, use_fast=True)
 
     if args.model_name_or_path:
         model = AutoModelForTokenClassification.from_pretrained(
@@ -339,7 +344,7 @@ def main():
 
     model.resize_token_embeddings(len(tokenizer))
 
-    # Preprocessing the raw_datasets.
+    # Preprocessing the datasets.
     # First we tokenize all the texts.
     padding = "max_length" if args.pad_to_max_length else False
 
@@ -379,7 +384,10 @@ def main():
         return tokenized_inputs
 
     processed_raw_datasets = raw_datasets.map(
-        tokenize_and_align_labels, batched=True, remove_columns=raw_datasets["train"].column_names
+        tokenize_and_align_labels,
+        batched=True,
+        remove_columns=raw_datasets["train"].column_names,
+        desc="Running tokenizer on dataset",
     )
 
     train_dataset = processed_raw_datasets["train"]

@@ -18,7 +18,7 @@
 
 from typing import TYPE_CHECKING
 
-from ...file_utils import _BaseLazyModule, is_flax_available, is_tf_available, is_torch_available
+from ...file_utils import _LazyModule, is_flax_available, is_tf_available, is_torch_available
 
 
 _import_structure = {
@@ -30,6 +30,7 @@ _import_structure = {
 
 if is_torch_available():
     _import_structure["modeling_auto"] = [
+        "MODEL_FOR_AUDIO_CLASSIFICATION_MAPPING",
         "MODEL_FOR_CAUSAL_LM_MAPPING",
         "MODEL_FOR_IMAGE_CLASSIFICATION_MAPPING",
         "MODEL_FOR_MASKED_LM_MAPPING",
@@ -45,11 +46,13 @@ if is_torch_available():
         "MODEL_MAPPING",
         "MODEL_WITH_LM_HEAD_MAPPING",
         "AutoModel",
+        "AutoModelForAudioClassification",
         "AutoModelForCausalLM",
         "AutoModelForImageClassification",
         "AutoModelForMaskedLM",
         "AutoModelForMultipleChoice",
         "AutoModelForNextSentencePrediction",
+        "AutoModelForObjectDetection",
         "AutoModelForPreTraining",
         "AutoModelForQuestionAnswering",
         "AutoModelForSeq2SeqLM",
@@ -87,11 +90,13 @@ if is_tf_available():
 if is_flax_available():
     _import_structure["modeling_flax_auto"] = [
         "FLAX_MODEL_FOR_CAUSAL_LM_MAPPING",
+        "FLAX_MODEL_FOR_IMAGE_CLASSIFICATION_MAPPING",
         "FLAX_MODEL_FOR_MASKED_LM_MAPPING",
         "FLAX_MODEL_FOR_MULTIPLE_CHOICE_MAPPING",
         "FLAX_MODEL_FOR_NEXT_SENTENCE_PREDICTION_MAPPING",
         "FLAX_MODEL_FOR_PRETRAINING_MAPPING",
         "FLAX_MODEL_FOR_QUESTION_ANSWERING_MAPPING",
+        "FLAX_MODEL_FOR_SEQ_TO_SEQ_CAUSAL_LM_MAPPING",
         "FLAX_MODEL_FOR_SEQUENCE_CLASSIFICATION_MAPPING",
         "FLAX_MODEL_FOR_TOKEN_CLASSIFICATION_MAPPING",
         "FLAX_MODEL_MAPPING",
@@ -103,6 +108,7 @@ if is_flax_available():
         "FlaxAutoModelForNextSentencePrediction",
         "FlaxAutoModelForPreTraining",
         "FlaxAutoModelForQuestionAnswering",
+        "FlaxAutoModelForSeq2SeqLM",
         "FlaxAutoModelForSequenceClassification",
         "FlaxAutoModelForTokenClassification",
     ]
@@ -116,6 +122,7 @@ if TYPE_CHECKING:
 
     if is_torch_available():
         from .modeling_auto import (
+            MODEL_FOR_AUDIO_CLASSIFICATION_MAPPING,
             MODEL_FOR_CAUSAL_LM_MAPPING,
             MODEL_FOR_IMAGE_CLASSIFICATION_MAPPING,
             MODEL_FOR_MASKED_LM_MAPPING,
@@ -131,11 +138,13 @@ if TYPE_CHECKING:
             MODEL_MAPPING,
             MODEL_WITH_LM_HEAD_MAPPING,
             AutoModel,
+            AutoModelForAudioClassification,
             AutoModelForCausalLM,
             AutoModelForImageClassification,
             AutoModelForMaskedLM,
             AutoModelForMultipleChoice,
             AutoModelForNextSentencePrediction,
+            AutoModelForObjectDetection,
             AutoModelForPreTraining,
             AutoModelForQuestionAnswering,
             AutoModelForSeq2SeqLM,
@@ -173,11 +182,13 @@ if TYPE_CHECKING:
     if is_flax_available():
         from .modeling_flax_auto import (
             FLAX_MODEL_FOR_CAUSAL_LM_MAPPING,
+            FLAX_MODEL_FOR_IMAGE_CLASSIFICATION_MAPPING,
             FLAX_MODEL_FOR_MASKED_LM_MAPPING,
             FLAX_MODEL_FOR_MULTIPLE_CHOICE_MAPPING,
             FLAX_MODEL_FOR_NEXT_SENTENCE_PREDICTION_MAPPING,
             FLAX_MODEL_FOR_PRETRAINING_MAPPING,
             FLAX_MODEL_FOR_QUESTION_ANSWERING_MAPPING,
+            FLAX_MODEL_FOR_SEQ_TO_SEQ_CAUSAL_LM_MAPPING,
             FLAX_MODEL_FOR_SEQUENCE_CLASSIFICATION_MAPPING,
             FLAX_MODEL_FOR_TOKEN_CLASSIFICATION_MAPPING,
             FLAX_MODEL_MAPPING,
@@ -189,24 +200,12 @@ if TYPE_CHECKING:
             FlaxAutoModelForNextSentencePrediction,
             FlaxAutoModelForPreTraining,
             FlaxAutoModelForQuestionAnswering,
+            FlaxAutoModelForSeq2SeqLM,
             FlaxAutoModelForSequenceClassification,
             FlaxAutoModelForTokenClassification,
         )
 
 else:
-    import importlib
-    import os
     import sys
 
-    class _LazyModule(_BaseLazyModule):
-        """
-        Module class that surfaces all objects but only performs associated imports when the objects are requested.
-        """
-
-        __file__ = globals()["__file__"]
-        __path__ = [os.path.dirname(__file__)]
-
-        def _get_module(self, module_name: str):
-            return importlib.import_module("." + module_name, self.__name__)
-
-    sys.modules[__name__] = _LazyModule(__name__, _import_structure)
+    sys.modules[__name__] = _LazyModule(__name__, globals()["__file__"], _import_structure)

@@ -59,15 +59,15 @@ classification:
 
 .. code-block:: python
 
-    import torch
+    from torch import nn
     from transformers import Trainer
 
     class MultilabelTrainer(Trainer):
         def compute_loss(self, model, inputs, return_outputs=False):
-            labels = inputs.pop("labels")
+            labels = inputs.get("labels")
             outputs = model(**inputs)
-            logits = outputs.logits
-            loss_fct = torch.nn.BCEWithLogitsLoss()
+            logits = outputs.get('logits')
+            loss_fct = nn.BCEWithLogitsLoss()
             loss = loss_fct(logits.view(-1, self.model.config.num_labels),
                             labels.float().view(-1, self.model.config.num_labels))
             return (loss, outputs) if return_outputs else loss
@@ -119,6 +119,97 @@ TFTrainingArguments
     :members:
 
 
+Checkpoints
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+By default, :class:`~transformers.Trainer` will save all checkpoints in the :obj:`output_dir` you set in the
+:class:`~transformers.TrainingArguments` you are using. Those will go in subfolder named :obj:`checkpoint-xxx` with xxx
+being the step at which the training was at.
+
+Resuming training from a checkpoint can be done when calling :meth:`~transformers.Trainer.train` with either:
+
+- :obj:`resume_from_checkpoint=True` which will resume training from the latest checkpoint
+- :obj:`resume_from_checkpoint=checkpoint_dir` which will resume training from the specific checkpoint in the directory
+  passed.
+
+In addition, you can easily save your checkpoints on the Model Hub when using :obj:`push_to_hub=True`. By default, all
+the models saved in intermediate checkpoints are saved in different commits, but not the optimizer state. You can adapt
+the :obj:`hub-strategy` value of your :class:`~transformers.TrainingArguments` to either:
+
+- :obj:`"checkpoint"`: the latest checkpoint is also pushed in a subfolder named last-checkpoint, allowing you to
+  resume training easily with :obj:`trainer.train(resume_from_checkpoint="output_dir/last-checkpoint")`.
+- :obj:`"all_checkpoints"`: all checkpoints are pushed like they appear in the output folder (so you will get one
+  checkpoint folder per folder in your final repository)
+
+
+Logging
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+By default :class:`~transformers.Trainer` will use ``logging.INFO`` for the main process and ``logging.WARNING`` for
+the replicas if any.
+
+These defaults can be overridden to use any of the 5 ``logging`` levels with :class:`~transformers.TrainingArguments`'s
+arguments:
+
+- ``log_level`` - for the main process
+- ``log_level_replica`` - for the replicas
+
+Further, if :class:`~transformers.TrainingArguments`'s ``log_on_each_node`` is set to ``False`` only the main node will
+use the log level settings for its main process, all other nodes will use the log level settings for replicas.
+
+Note that :class:`~transformers.Trainer` is going to set ``transformers``'s log level separately for each node in its
+:meth:`~transformers.Trainer.__init__`. So you may want to set this sooner (see the next example) if you tap into other
+``transformers`` functionality before creating the :class:`~transformers.Trainer` object.
+
+Here is an example of how this can be used in an application:
+
+.. code-block:: python
+
+    [...]
+    logger = logging.getLogger(__name__)
+
+    # Setup logging
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        handlers=[logging.StreamHandler(sys.stdout)],
+    )
+
+    # set the main code and the modules it uses to the same log-level according to the node
+    log_level = training_args.get_process_log_level()
+    logger.setLevel(log_level)
+    datasets.utils.logging.set_verbosity(log_level)
+    transformers.utils.logging.set_verbosity(log_level)
+
+    trainer = Trainer(...)
+
+And then if you only want to see warnings on the main node and all other nodes to not print any most likely duplicated
+warnings you could run it as:
+
+.. code-block:: bash
+
+    my_app.py ... --log_level warning --log_level_replica error
+
+In the multi-node environment if you also don't want the logs to repeat for each node's main process, you will want to
+change the above to:
+
+.. code-block:: bash
+
+    my_app.py ... --log_level warning --log_level_replica error --log_on_each_node 0
+
+and then only the main process of the first node will log at the "warning" level, and all other processes on the main
+node and all processes on other nodes will log at the "error" level.
+
+If you need your application to be as quiet as possible you could do:
+
+.. code-block:: bash
+
+    my_app.py ... --log_level error --log_level_replica error --log_on_each_node 0
+
+(add ``--log_on_each_node 0`` if on multi-node environment)
+
+
+
 Randomness
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -129,7 +220,7 @@ which should make the "stop and resume" style of training as close as possible t
 However, due to various default non-deterministic pytorch settings this might not fully work. If you want full
 determinism please refer to `Controlling sources of randomness
 <https://pytorch.org/docs/stable/notes/randomness.html>`__. As explained in the document, that some of those settings
-that make things determinstic (.e.g., ``torch.backends.cudnn.deterministic``) may slow things down, therefore this
+that make things deterministic (.e.g., ``torch.backends.cudnn.deterministic``) may slow things down, therefore this
 can't be done by default, but you can enable those yourself if needed.
 
 
