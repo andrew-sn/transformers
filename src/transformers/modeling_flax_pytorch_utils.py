@@ -21,6 +21,7 @@ from typing import Dict, Tuple
 
 import numpy as np
 
+import jax
 import jax.numpy as jnp
 import transformers
 from flax.serialization import from_bytes
@@ -43,8 +44,9 @@ def load_pytorch_checkpoint_in_flax_state_dict(flax_model, pytorch_checkpoint_pa
         import torch  # noqa: F401
     except ImportError:
         logger.error(
-            "Loading a PyTorch model in Flax, requires both PyTorch and Flax to be installed. Please see "
-            "https://pytorch.org/ and https://flax.readthedocs.io/en/latest/installation.html for installation instructions."
+            "Loading a PyTorch model in Flax, requires both PyTorch and Flax to be installed. Please see"
+            " https://pytorch.org/ and https://flax.readthedocs.io/en/latest/installation.html for installation"
+            " instructions."
         )
         raise
 
@@ -68,7 +70,7 @@ def rename_key_and_reshape_tensor(
     """Rename PT weight names to corresponding Flax weight names and reshape tensor if necessary"""
 
     def is_key_or_prefix_key_in_dict(key: Tuple[str]) -> bool:
-        """Checks if ``key`` of ``(prefix,) + key`` is in random_flax_state_dict"""
+        """Checks if `key` of `(prefix,) + key` is in random_flax_state_dict"""
         return len(set(random_flax_state_dict) & set([key, (model_prefix,) + key])) > 0
 
     # layer norm
@@ -184,10 +186,24 @@ def load_flax_weights_in_pytorch_model(pt_model, flax_state):
         import torch  # noqa: F401
     except ImportError:
         logger.error(
-            "Loading a Flax weights in PyTorch, requires both PyTorch and Flax to be installed. Please see "
-            "https://pytorch.org/ and https://flax.readthedocs.io/en/latest/installation.html for installation instructions."
+            "Loading a Flax weights in PyTorch, requires both PyTorch and Flax to be installed. Please see"
+            " https://pytorch.org/ and https://flax.readthedocs.io/en/latest/installation.html for installation"
+            " instructions."
         )
         raise
+
+    # check if we have bf16 weights
+    is_type_bf16 = flatten_dict(jax.tree_map(lambda x: x.dtype == jnp.bfloat16, flax_state)).values()
+    if any(is_type_bf16):
+        # convert all weights to fp32 if the are bf16 since torch.from_numpy can-not handle bf16
+        # and bf16 is not fully supported in PT yet.
+        logger.warning(
+            "Found ``bfloat16`` weights in Flax model. Casting all ``bfloat16`` weights to ``float32`` "
+            "before loading those in PyTorch model."
+        )
+        flax_state = jax.tree_map(
+            lambda params: params.astype(np.float32) if params.dtype == jnp.bfloat16 else params, flax_state
+        )
 
     flax_state_dict = flatten_dict(flax_state)
     pt_model_dict = pt_model.state_dict()
@@ -230,7 +246,7 @@ def load_flax_weights_in_pytorch_model(pt_model, flax_state):
         if flax_key in pt_model_dict:
             if flax_tensor.shape != pt_model_dict[flax_key].shape:
                 raise ValueError(
-                    f"Flax checkpoint seems to be incorrect. Weight {flax_key_tuple} was expected"
+                    f"Flax checkpoint seems to be incorrect. Weight {flax_key_tuple} was expected "
                     f"to be of shape {pt_model_dict[flax_key].shape}, but is {flax_tensor.shape}."
                 )
             else:
@@ -250,20 +266,21 @@ def load_flax_weights_in_pytorch_model(pt_model, flax_state):
 
     if len(unexpected_keys) > 0:
         logger.warning(
-            "Some weights of the Flax model were not used when "
-            f"initializing the PyTorch model {pt_model.__class__.__name__}: {unexpected_keys}\n"
-            f"- This IS expected if you are initializing {pt_model.__class__.__name__} from a Flax model trained on another task "
-            "or with another architecture (e.g. initializing a BertForSequenceClassification model from a FlaxBertForPreTraining model).\n"
-            f"- This IS NOT expected if you are initializing {pt_model.__class__.__name__} from a Flax model that you expect "
-            "to be exactly identical (e.g. initializing a BertForSequenceClassification model from a FlaxBertForSequenceClassification model)."
+            "Some weights of the Flax model were not used when initializing the PyTorch model"
+            f" {pt_model.__class__.__name__}: {unexpected_keys}\n- This IS expected if you are initializing"
+            f" {pt_model.__class__.__name__} from a Flax model trained on another task or with another architecture"
+            " (e.g. initializing a BertForSequenceClassification model from a FlaxBertForPreTraining model).\n- This"
+            f" IS NOT expected if you are initializing {pt_model.__class__.__name__} from a Flax model that you expect"
+            " to be exactly identical (e.g. initializing a BertForSequenceClassification model from a"
+            " FlaxBertForSequenceClassification model)."
         )
     else:
         logger.warning(f"All Flax model weights were used when initializing {pt_model.__class__.__name__}.\n")
     if len(missing_keys) > 0:
         logger.warning(
-            f"Some weights of {pt_model.__class__.__name__} were not initialized from the Flax model "
-            f"and are newly initialized: {missing_keys}\n"
-            "You should probably TRAIN this model on a down-stream task to be able to use it for predictions and inference."
+            f"Some weights of {pt_model.__class__.__name__} were not initialized from the Flax model and are newly"
+            f" initialized: {missing_keys}\nYou should probably TRAIN this model on a down-stream task to be able to"
+            " use it for predictions and inference."
         )
     else:
         logger.warning(

@@ -50,13 +50,13 @@ class FlaxHybridCLIPModule(nn.Module):
         self.visual_projection = nn.Dense(
             self.projection_dim,
             dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(0.02, dtype=self.dtype),
+            kernel_init=jax.nn.initializers.normal(0.02),
             use_bias=False,
         )
         self.text_projection = nn.Dense(
             self.projection_dim,
             dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(0.02, dtype=self.dtype),
+            kernel_init=jax.nn.initializers.normal(0.02),
             use_bias=False,
         )
         self.logit_scale = self.param("logit_scale", jax.nn.initializers.ones, [])
@@ -140,7 +140,7 @@ class FlaxHybridCLIP(FlaxPreTrainedModel):
         module = self.module_class(config=config, dtype=dtype, **kwargs)
         super().__init__(config, module, input_shape=input_shape, seed=seed, dtype=dtype)
 
-    def init_weights(self, rng: jax.random.PRNGKey, input_shape: Tuple) -> FrozenDict:
+    def init_weights(self, rng: jax.random.PRNGKey, input_shape: Tuple, params: FrozenDict = None) -> FrozenDict:
         # init input tensor
         input_ids = jnp.zeros(input_shape[0], dtype="i4")
         position_ids = jnp.broadcast_to(jnp.arange(jnp.atleast_2d(input_ids).shape[-1]), input_shape[0])

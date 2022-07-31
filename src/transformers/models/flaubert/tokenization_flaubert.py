@@ -17,8 +17,6 @@
 
 import unicodedata
 
-import six
-
 from ...utils import logging
 from ..xlm.tokenization_xlm import XLMTokenizer
 
@@ -32,16 +30,28 @@ VOCAB_FILES_NAMES = {
 
 PRETRAINED_VOCAB_FILES_MAP = {
     "vocab_file": {
-        "flaubert/flaubert_small_cased": "https://huggingface.co/flaubert/flaubert_small_cased/resolve/main/vocab.json",
-        "flaubert/flaubert_base_uncased": "https://huggingface.co/flaubert/flaubert_base_uncased/resolve/main/vocab.json",
+        "flaubert/flaubert_small_cased": (
+            "https://huggingface.co/flaubert/flaubert_small_cased/resolve/main/vocab.json"
+        ),
+        "flaubert/flaubert_base_uncased": (
+            "https://huggingface.co/flaubert/flaubert_base_uncased/resolve/main/vocab.json"
+        ),
         "flaubert/flaubert_base_cased": "https://huggingface.co/flaubert/flaubert_base_cased/resolve/main/vocab.json",
-        "flaubert/flaubert_large_cased": "https://huggingface.co/flaubert/flaubert_large_cased/resolve/main/vocab.json",
+        "flaubert/flaubert_large_cased": (
+            "https://huggingface.co/flaubert/flaubert_large_cased/resolve/main/vocab.json"
+        ),
     },
     "merges_file": {
-        "flaubert/flaubert_small_cased": "https://huggingface.co/flaubert/flaubert_small_cased/resolve/main/merges.txt",
-        "flaubert/flaubert_base_uncased": "https://huggingface.co/flaubert/flaubert_base_uncased/resolve/main/merges.txt",
+        "flaubert/flaubert_small_cased": (
+            "https://huggingface.co/flaubert/flaubert_small_cased/resolve/main/merges.txt"
+        ),
+        "flaubert/flaubert_base_uncased": (
+            "https://huggingface.co/flaubert/flaubert_base_uncased/resolve/main/merges.txt"
+        ),
         "flaubert/flaubert_base_cased": "https://huggingface.co/flaubert/flaubert_base_cased/resolve/main/merges.txt",
-        "flaubert/flaubert_large_cased": "https://huggingface.co/flaubert/flaubert_large_cased/resolve/main/merges.txt",
+        "flaubert/flaubert_large_cased": (
+            "https://huggingface.co/flaubert/flaubert_large_cased/resolve/main/merges.txt"
+        ),
     },
 }
 
@@ -64,16 +74,16 @@ def convert_to_unicode(text):
     """
     Converts `text` to Unicode (if it's not already), assuming UTF-8 input.
     """
-    # six_ensure_text is copied from https://github.com/benjaminp/six
-    def six_ensure_text(s, encoding="utf-8", errors="strict"):
-        if isinstance(s, six.binary_type):
+
+    def ensure_text(s, encoding="utf-8", errors="strict"):
+        if isinstance(s, bytes):
             return s.decode(encoding, errors)
-        elif isinstance(s, six.text_type):
+        elif isinstance(s, str):
             return s
         else:
             raise TypeError(f"not expecting type '{type(s)}'")
 
-    return six_ensure_text(text, encoding="utf-8", errors="ignore")
+    return ensure_text(text, encoding="utf-8", errors="ignore")
 
 
 class FlaubertTokenizer(XLMTokenizer):
@@ -82,12 +92,12 @@ class FlaubertTokenizer(XLMTokenizer):
 
     - Moses preprocessing and tokenization.
     - Normalizing all inputs text.
-    - The arguments ``special_tokens`` and the function ``set_special_tokens``, can be used to add additional symbols
-      (like "__classify__") to a vocabulary.
-    - The argument :obj:`do_lowercase` controls lower casing (automatically set for pretrained vocabularies).
+    - The arguments `special_tokens` and the function `set_special_tokens`, can be used to add additional symbols (like
+      "__classify__") to a vocabulary.
+    - The argument `do_lowercase` controls lower casing (automatically set for pretrained vocabularies).
 
-    This tokenizer inherits from :class:`~transformers.XLMTokenizer`. Please check the superclass for usage examples
-    and documentation regarding arguments.
+    This tokenizer inherits from [`XLMTokenizer`]. Please check the superclass for usage examples and documentation
+    regarding arguments.
     """
 
     vocab_files_names = VOCAB_FILES_NAMES
@@ -96,7 +106,7 @@ class FlaubertTokenizer(XLMTokenizer):
     max_model_input_sizes = PRETRAINED_POSITIONAL_EMBEDDINGS_SIZES
 
     def __init__(self, do_lowercase=False, **kwargs):
-        super().__init__(**kwargs)
+        super().__init__(do_lowercase=do_lowercase, **kwargs)
         self.do_lowercase = do_lowercase
         self.do_lowercase_and_remove_accent = False
 
@@ -130,7 +140,8 @@ class FlaubertTokenizer(XLMTokenizer):
         lang = "fr"
         if lang and self.lang2id and lang not in self.lang2id:
             logger.error(
-                "Supplied language code not found in lang2id mapping. Please check that your language is supported by the loaded pretrained model."
+                "Supplied language code not found in lang2id mapping. Please check that your language is supported by"
+                " the loaded pretrained model."
             )
 
         if bypass_tokenizer:

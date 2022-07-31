@@ -32,14 +32,19 @@ Coming soon!
 
 | Task | Example datasets | Trainer support | 🤗 Accelerate | 🤗 Datasets | Colab
 |---|---|:---:|:---:|:---:|:---:|
-| [**`language-modeling`**](https://github.com/huggingface/transformers/tree/master/examples/pytorch/language-modeling) | WikiText-2 | ✅ | ✅ | ✅ | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/huggingface/notebooks/blob/master/examples/language_modeling.ipynb)
-| [**`multiple-choice`**](https://github.com/huggingface/transformers/tree/master/examples/pytorch/multiple-choice) | SWAG | ✅ | ✅ | ✅ | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/huggingface/notebooks/blob/master/examples/multiple_choice.ipynb)
-| [**`question-answering`**](https://github.com/huggingface/transformers/tree/master/examples/pytorch/question-answering) | SQuAD | ✅ | ✅ | ✅ | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/huggingface/notebooks/blob/master/examples/question_answering.ipynb)
-| [**`summarization`**](https://github.com/huggingface/transformers/tree/master/examples/pytorch/summarization) |  XSum | ✅ | ✅ | ✅ | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/huggingface/notebooks/blob/master/examples/summarization.ipynb)
-| [**`text-classification`**](https://github.com/huggingface/transformers/tree/master/examples/pytorch/text-classification) | GLUE | ✅ | ✅ | ✅ | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/huggingface/notebooks/blob/master/examples/text_classification.ipynb)
-| [**`text-generation`**](https://github.com/huggingface/transformers/tree/master/examples/pytorch/text-generation) | - | n/a | - | - | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/huggingface/blog/blob/master/notebooks/02_how_to_generate.ipynb)
-| [**`token-classification`**](https://github.com/huggingface/transformers/tree/master/examples/pytorch/token-classification) | CoNLL NER | ✅ |✅ | ✅ | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/huggingface/notebooks/blob/master/examples/token_classification.ipynb)
-| [**`translation`**](https://github.com/huggingface/transformers/tree/master/examples/pytorch/translation) | WMT | ✅ | ✅ |✅ | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/huggingface/notebooks/blob/master/examples/translation.ipynb)
+| [**`language-modeling`**](https://github.com/huggingface/transformers/tree/main/examples/pytorch/language-modeling) | WikiText-2 | ✅ | ✅ | ✅ | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/huggingface/notebooks/blob/main/examples/language_modeling.ipynb)
+| [**`multiple-choice`**](https://github.com/huggingface/transformers/tree/main/examples/pytorch/multiple-choice) | SWAG | ✅ | ✅ | ✅ | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/huggingface/notebooks/blob/main/examples/multiple_choice.ipynb)
+| [**`question-answering`**](https://github.com/huggingface/transformers/tree/main/examples/pytorch/question-answering) | SQuAD | ✅ | ✅ | ✅ | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/huggingface/notebooks/blob/main/examples/question_answering.ipynb)
+| [**`summarization`**](https://github.com/huggingface/transformers/tree/main/examples/pytorch/summarization) |  XSum | ✅ | ✅ | ✅ | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/huggingface/notebooks/blob/main/examples/summarization.ipynb)
+| [**`text-classification`**](https://github.com/huggingface/transformers/tree/main/examples/pytorch/text-classification) | GLUE | ✅ | ✅ | ✅ | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/huggingface/notebooks/blob/main/examples/text_classification.ipynb)
+| [**`text-generation`**](https://github.com/huggingface/transformers/tree/main/examples/pytorch/text-generation) | - | n/a | - | - | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/huggingface/blog/blob/main/notebooks/02_how_to_generate.ipynb)
+| [**`token-classification`**](https://github.com/huggingface/transformers/tree/main/examples/pytorch/token-classification) | CoNLL NER | ✅ |✅ | ✅ | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/huggingface/notebooks/blob/main/examples/token_classification.ipynb)
+| [**`translation`**](https://github.com/huggingface/transformers/tree/main/examples/pytorch/translation) | WMT | ✅ | ✅ |✅ | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/huggingface/notebooks/blob/main/examples/translation.ipynb)
+| [**`speech-recognition`**](https://github.com/huggingface/transformers/tree/main/examples/pytorch/speech-recognition) | TIMIT | ✅ | - |✅ | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/huggingface/notebooks/blob/main/examples/speech_recognition.ipynb)
+| [**`multi-lingual speech-recognition`**](https://github.com/huggingface/transformers/tree/main/examples/pytorch/speech-recognition) | Common Voice | ✅ | - |✅ | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/huggingface/notebooks/blob/main/examples/multi_lingual_speech_recognition.ipynb)
+| [**`audio-classification`**](https://github.com/huggingface/transformers/tree/main/examples/pytorch/audio-classification) | SUPERB KS | ✅ | - |✅ | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/huggingface/notebooks/blob/main/examples/audio_classification.ipynb)
+| [**`image-classification`**](https://github.com/huggingface/transformers/tree/main/examples/pytorch/image-classification) | CIFAR-10 | ✅ | ✅ |✅ | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/huggingface/notebooks/blob/main/examples/image_classification.ipynb)
+| [**`semantic-segmentation`**](https://github.com/huggingface/transformers/tree/main/examples/pytorch/semantic-segmentation) | SCENE_PARSE_150 | ✅ | ✅ |✅ | /
 
 
 ## Running quick tests
@@ -74,10 +79,21 @@ line, 🤗 Trainer supports resuming from a checkpoint via `trainer.train(resume
 2. If `resume_from_checkpoint` is a path to a specific checkpoint it will use that saved checkpoint folder to resume the training from.
 
 
+### Upload the trained/fine-tuned model to the Hub
+
+All the example scripts support automatic upload of your final model to the [Model Hub](https://huggingface.co/models) by adding a `--push_to_hub` argument. It will then create a repository with your username slash the name of the folder you are using as `output_dir`. For instance, `"sgugger/test-mrpc"` if your username is `sgugger` and you are working in the folder `~/tmp/test-mrpc`.
+
+To specify a given repository name, use the `--hub_model_id` argument. You will need to specify the whole repository name (including your username), for instance `--hub_model_id sgugger/finetuned-bert-mrpc`. To upload to an organization you are a member of, just use the name of that organization instead of your username: `--hub_model_id huggingface/finetuned-bert-mrpc`.
+
+A few notes on this integration:
+
+- you will need to be logged in to the Hugging Face website locally for it to work, the easiest way to achieve this is to run `huggingface-cli login` and then type your username and password when prompted. You can also pass along your authentication token with the `--hub_token` argument.
+- the `output_dir` you pick will either need to be a new folder or a local clone of the distant repository you are using.
+
 ## Distributed training and mixed precision
 
 All the PyTorch scripts mentioned above work out of the box with distributed training and mixed precision, thanks to
-the [Trainer API](https://huggingface.co/transformers/main_classes/trainer.html). To launch one of them on _n_ GPUS,
+the [Trainer API](https://huggingface.co/transformers/main_classes/trainer.html). To launch one of them on _n_ GPUs,
 use the following command:
 
 ```bash
@@ -108,7 +124,7 @@ training with PyTorch 1.6.0 or latest, or by installing the [Apex](https://githu
 versions. Just add the flag `--fp16` to your command launching one of the scripts mentioned above!
 
 Using mixed precision training usually results in 2x-speedup for training with the same final results (as shown in
-[this table](https://github.com/huggingface/transformers/tree/master/examples/text-classification#mixed-precision-training)
+[this table](https://github.com/huggingface/transformers/tree/main/examples/text-classification#mixed-precision-training)
 for text classification).
 
 ## Running on TPUs
@@ -119,7 +135,7 @@ When using PyTorch, we support TPUs thanks to `pytorch/xla`. For more context an
 very detailed [pytorch/xla README](https://github.com/pytorch/xla/blob/master/README.md).
 
 In this repo, we provide a very simple launcher script named
-[xla_spawn.py](https://github.com/huggingface/transformers/tree/master/examples/pytorch/xla_spawn.py) that lets you run our
+[xla_spawn.py](https://github.com/huggingface/transformers/tree/main/examples/pytorch/xla_spawn.py) that lets you run our
 example scripts on multiple TPU cores without any boilerplate. Just pass a `--num_cores` flag to this script, then your
 regular training script with its arguments (this is similar to the `torch.distributed.launch` helper for
 `torch.distributed`):
@@ -151,10 +167,10 @@ python xla_spawn.py --num_cores 8 \
 
 Most PyTorch example scripts have a version using the [🤗 Accelerate](https://github.com/huggingface/accelerate) library
 that exposes the training loop so it's easy for you to customize or tweak them to your needs. They all require you to
-install `accelerate` with
+install `accelerate` with the latest development version
 
 ```bash
-pip install accelerate
+pip install git+https://github.com/huggingface/accelerate
 ```
 
 Then you can easily launch any of the scripts by running
@@ -169,7 +185,7 @@ and reply to the questions asked. Then
 accelerate test
 ```
 
-that will check everything is ready for training. Finally, you cam launch training with
+that will check everything is ready for training. Finally, you can launch training with
 
 ```bash
 accelerate launch path_to_script.py --args_to_script
@@ -212,7 +228,7 @@ Advanced configuration is possible by setting environment variables:
 
 | Environment Variable | Value |
 |---|---|
-| WANDB_LOG_MODEL | Log the model as artifact (log the model as artifact at the end of training (`false` by default) |
+| WANDB_LOG_MODEL | Log the model as artifact (log the model as artifact at the end of training) (`false` by default) |
 | WANDB_WATCH | one of `gradients` (default) to log histograms of gradients, `all` to log histograms of both gradients and parameters, or `false` for no histogram logging |
 | WANDB_PROJECT | Organize runs by project |
 
