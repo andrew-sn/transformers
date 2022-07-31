@@ -79,8 +79,8 @@ def postprocess_qa_predictions(
     assert len(predictions[0]) == len(features), f"Got {len(predictions[0])} predictions and {len(features)} features."
 
     # Build a map example to its corresponding features.
-    example_id_to_index = {k: i for i, k in enumerate(examples["id"])}
-    features_per_example = collections.defaultdict(list)
+    example_id_to_index = {k: i for i, k in enumerate(examples["id"])}   # 根据问题的id来寻找对应的问题index
+    features_per_example = collections.defaultdict(list)  # 每个问题都可能包含多个features
     for i, feature in enumerate(features):
         features_per_example[example_id_to_index[feature["example_id"]]].append(i)
 
@@ -99,7 +99,7 @@ def postprocess_qa_predictions(
         # Those are the indices of the features associated to the current example.
         feature_indices = features_per_example[example_index]
 
-        min_null_prediction = None
+        min_null_prediction = None  # 对一个问题设定一个值
         prelim_predictions = []
 
         # Looping through all the features associated to the current example.
@@ -112,10 +112,12 @@ def postprocess_qa_predictions(
             offset_mapping = features[feature_index]["offset_mapping"]
             # Optional `token_is_max_context`, if provided we will remove answers that do not have the maximum context
             # available in the current feature.
+            # 用来忽略start位置语义不充分的场景 这里忽略
             token_is_max_context = features[feature_index].get("token_is_max_context", None)
 
             # Update minimum null prediction.
             feature_null_score = start_logits[0] + end_logits[0]
+            # 这里对于example来说的null_prediction是取所有feature_null的最小值
             if min_null_prediction is None or min_null_prediction["score"] > feature_null_score:
                 min_null_prediction = {
                     "offsets": (0, 0),
@@ -125,6 +127,8 @@ def postprocess_qa_predictions(
                 }
 
             # Go through all possibilities for the `n_best_size` greater start and end logits.
+            # np.argsor默认返回数值从小到大的index
+            # 按照概率高低 取前n_best_size-1个位置
             start_indexes = np.argsort(start_logits)[-1 : -n_best_size - 1 : -1].tolist()
             end_indexes = np.argsort(end_logits)[-1 : -n_best_size - 1 : -1].tolist()
             for start_index in start_indexes:

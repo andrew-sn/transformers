@@ -478,7 +478,12 @@ class BasicTokenizer(object):
             or (cp >= 0x2B740 and cp <= 0x2B81F)  #
             or (cp >= 0x2B820 and cp <= 0x2CEAF)  #
             or (cp >= 0xF900 and cp <= 0xFAFF)
-            or (cp >= 0x2F800 and cp <= 0x2FA1F)  #
+            or (cp >= 0x2F800 and cp <= 0x2FA1F)  or #
+            (cp >= 0x2600 and cp <= 0x27FF) or  # emoji space
+            (cp >= 0x2B00 and cp <= 0x2BFF) or  # emoji space
+            (cp == 0x3299) or  # emoji Circled Ideograph Secret
+            (cp == 0x231A) or  # emoji watch
+            (cp >= 0x1F000 and cp <= 0x1F9FF)  # emoji space
         ):  #
             return True
 

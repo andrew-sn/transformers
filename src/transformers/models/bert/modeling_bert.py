@@ -170,6 +170,7 @@ class BertEmbeddings(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.word_embeddings = nn.Embedding(config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id)
+        # self.word_embeddings = nn.Embedding(config.vocab_size, config.hidden_size)
         self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
         self.token_type_embeddings = nn.Embedding(config.type_vocab_size, config.hidden_size)
 
@@ -199,6 +200,7 @@ class BertEmbeddings(nn.Module):
 
         if position_ids is None:
             position_ids = self.position_ids[:, past_key_values_length : seq_length + past_key_values_length]
+        logger.debug("position_ids: {}".format(position_ids.dtype))
 
         # Setting the token_type_ids to the registered buffer in constructor where it is all zeros, which usually occurs
         # when its auto-generated, registered buffer helps users when tracing the model without passing token_type_ids, solves
@@ -210,17 +212,24 @@ class BertEmbeddings(nn.Module):
                 token_type_ids = buffered_token_type_ids_expanded
             else:
                 token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=self.position_ids.device)
-
+        logger.debug("token_type_ids: {}".format(token_type_ids.dtype))
         if inputs_embeds is None:
+            logger.debug("input_ids: {}".format(input_ids.dtype))
             inputs_embeds = self.word_embeddings(input_ids)
+            logger.debug("inputs_embeds: {}".format(inputs_embeds.dtype))
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
-
+        logger.debug("token_type_ids: {}".format(token_type_ids.dtype))
+        logger.debug("token_type_embeddings: {}".format(token_type_embeddings.dtype))
         embeddings = inputs_embeds + token_type_embeddings
+        logger.debug("embeddings: {}".format(embeddings.dtype))
         if self.position_embedding_type == "absolute":
             position_embeddings = self.position_embeddings(position_ids)
             embeddings += position_embeddings
+        logger.debug("embeddings before layernorm: {}".format(embeddings.dtype))
         embeddings = self.LayerNorm(embeddings)
+        logger.debug("embeddings after layernorm: {}".format(embeddings.dtype))
         embeddings = self.dropout(embeddings)
+        logger.debug("embeddings after dropout: {}".format(embeddings.dtype))
         return embeddings
 
 
@@ -264,7 +273,9 @@ class BertSelfAttention(nn.Module):
         past_key_value=None,
         output_attentions=False,
     ):
+        logger.debug("hidden_states before query: {}".format(hidden_states.dtype))
         mixed_query_layer = self.query(hidden_states)
+        logger.debug("mixed_query_layer after query: {}".format(mixed_query_layer.dtype))
 
         # If this is instantiated as a cross-attention module, the keys
         # and values come from an encoder; the attention mask needs to be
@@ -287,7 +298,9 @@ class BertSelfAttention(nn.Module):
             value_layer = torch.cat([past_key_value[1], value_layer], dim=2)
         else:
             key_layer = self.transpose_for_scores(self.key(hidden_states))
+            logger.debug("key_layer after key: {}".format(key_layer.dtype))
             value_layer = self.transpose_for_scores(self.value(hidden_states))
+            logger.debug("value_layer after value: {}".format(value_layer.dtype))
 
         query_layer = self.transpose_for_scores(mixed_query_layer)
 
@@ -302,7 +315,11 @@ class BertSelfAttention(nn.Module):
             past_key_value = (key_layer, value_layer)
 
         # Take the dot product between "query" and "key" to get the raw attention scores.
+        logger.debug("query_layer before matmul: {}".format(query_layer.dtype))
+        logger.debug("key_layer before matmul: {}".format(key_layer.dtype))
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+        logger.debug("query_layer after matmul: {}".format(query_layer.dtype))
+        logger.debug("key_layer after matmul: {}".format(key_layer.dtype))
 
         if self.position_embedding_type == "relative_key" or self.position_embedding_type == "relative_key_query":
             seq_length = hidden_states.size()[1]
@@ -320,13 +337,17 @@ class BertSelfAttention(nn.Module):
                 relative_position_scores_key = torch.einsum("bhrd,lrd->bhlr", key_layer, positional_embedding)
                 attention_scores = attention_scores + relative_position_scores_query + relative_position_scores_key
 
+        logger.debug("attention_scores before /: {}".format(attention_scores.dtype))
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
+        logger.debug("attention_scores after /: {}".format(attention_scores.dtype))
         if attention_mask is not None:
             # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
             attention_scores = attention_scores + attention_mask
 
         # Normalize the attention scores to probabilities.
+        logger.debug("attention_scores before softmax: {}".format(attention_scores.dtype))
         attention_probs = nn.Softmax(dim=-1)(attention_scores)
+        logger.debug("attention_scores after softmax: {}".format(attention_scores.dtype))
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
@@ -336,7 +357,11 @@ class BertSelfAttention(nn.Module):
         if head_mask is not None:
             attention_probs = attention_probs * head_mask
 
+        logger.debug("attention_probs before matmul: {}".format(attention_probs.dtype))
+        logger.debug("value_layer before matmul: {}".format(value_layer.dtype))
         context_layer = torch.matmul(attention_probs, value_layer)
+        logger.debug("attention_probs after matmul: {}".format(attention_probs.dtype))
+        logger.debug("value_layer after matmul: {}".format(value_layer.dtype))
 
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
@@ -360,6 +385,7 @@ class BertSelfOutput(nn.Module):
         hidden_states = self.dense(hidden_states)
         hidden_states = self.dropout(hidden_states)
         hidden_states = self.LayerNorm(hidden_states + input_tensor)
+        # hidden_states = self.LayerNorm(hidden_states)
         return hidden_states
 
 
@@ -438,6 +464,7 @@ class BertOutput(nn.Module):
         hidden_states = self.dense(hidden_states)
         hidden_states = self.dropout(hidden_states)
         hidden_states = self.LayerNorm(hidden_states + input_tensor)
+        # hidden_states = self.LayerNorm(hidden_states)
         return hidden_states
 
 
@@ -590,6 +617,7 @@ class BertEncoder(nn.Module):
                 )
 
             hidden_states = layer_outputs[0]
+
             if use_cache:
                 next_decoder_cache += (layer_outputs[-1],)
             if output_attentions:
@@ -612,6 +640,7 @@ class BertEncoder(nn.Module):
                 ]
                 if v is not None
             )
+
         return BaseModelOutputWithPastAndCrossAttentions(
             last_hidden_state=hidden_states,
             past_key_values=next_decoder_cache,
@@ -761,6 +790,8 @@ class BertForPreTrainingOutput(ModelOutput):
     """
 
     loss: Optional[torch.FloatTensor] = None
+    masked_lm_loss: Optional[torch.FloatTensor] = None
+    next_sentence_loss: Optional[torch.FloatTensor] = None
     prediction_logits: torch.FloatTensor = None
     seq_relationship_logits: torch.FloatTensor = None
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
@@ -862,6 +893,8 @@ class BertModel(BertPreTrainedModel):
 
         self.pooler = BertPooler(config) if add_pooling_layer else None
 
+        # 实际上这里什么也不会发生
+        # 因为BertModel的self.get_output_embeddings返回为None
         self.init_weights()
 
     def get_input_embeddings(self):
@@ -961,7 +994,7 @@ class BertModel(BertPreTrainedModel):
         # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
         # ourselves in which case we just need to make it broadcastable to all heads.
         extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(attention_mask, input_shape, device)
-
+        logger.debug("extended_attention_mask: {}".format(extended_attention_mask.dtype))
         # If a 2D or 3D attention mask is provided for the cross-attention
         # we need to make broadcastable to [batch_size, num_heads, seq_length, seq_length]
         if self.config.is_decoder and encoder_hidden_states is not None:
@@ -999,9 +1032,9 @@ class BertModel(BertPreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
+
         sequence_output = encoder_outputs[0]
         pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
-
         if not return_dict:
             return (sequence_output, pooled_output) + encoder_outputs[1:]
 
@@ -1028,7 +1061,6 @@ class BertForPreTraining(BertPreTrainedModel):
 
         self.bert = BertModel(config)
         self.cls = BertPreTrainingHeads(config)
-
         self.init_weights()
 
     def get_output_embeddings(self):
@@ -1097,15 +1129,26 @@ class BertForPreTraining(BertPreTrainedModel):
             return_dict=return_dict,
         )
 
+        # [B, S, H], [B, H]
         sequence_output, pooled_output = outputs[:2]
+        # [B, S, V], [B, 2]
         prediction_scores, seq_relationship_score = self.cls(sequence_output, pooled_output)
 
-        total_loss = None
+        total_loss, masked_lm_loss, next_sentence_loss = None, None, None
+
         if labels is not None and next_sentence_label is not None:
-            loss_fct = CrossEntropyLoss()
+            loss_fct = CrossEntropyLoss(reduction="mean", ignore_index=-100)
+            # ([B, S, V]-->[B*S, V]) & ([B, H]-->[B*H]) 对每个有效的masked_token进行求均值
             masked_lm_loss = loss_fct(prediction_scores.view(-1, self.config.vocab_size), labels.view(-1))
+            # [B, 2] & ([B, 1]-->[B])
             next_sentence_loss = loss_fct(seq_relationship_score.view(-1, 2), next_sentence_label.view(-1))
             total_loss = masked_lm_loss + next_sentence_loss
+        
+        # for Roberta
+        if labels is not None and next_sentence_label is None:
+            loss_fct = CrossEntropyLoss(reduction="mean", ignore_index=-100)
+            masked_lm_loss = loss_fct(prediction_scores.view(-1, self.config.vocab_size), labels.view(-1))
+            total_loss = masked_lm_loss
 
         if not return_dict:
             output = (prediction_scores, seq_relationship_score) + outputs[2:]
@@ -1113,6 +1156,8 @@ class BertForPreTraining(BertPreTrainedModel):
 
         return BertForPreTrainingOutput(
             loss=total_loss,
+            masked_lm_loss=masked_lm_loss,
+            next_sentence_loss=next_sentence_loss,
             prediction_logits=prediction_scores,
             seq_relationship_logits=seq_relationship_score,
             hidden_states=outputs.hidden_states,
@@ -1490,8 +1535,14 @@ class BertForSequenceClassification(BertPreTrainedModel):
         )
         self.dropout = nn.Dropout(classifier_dropout)
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
-
         self.init_weights()
+        self.reset_parameters()
+        # self.counter = 0
+
+
+    def reset_parameters(self):
+        nn.init.trunc_normal_(self.classifier.weight, std=0.02)
+        nn.init.zeros_(self.classifier.bias)
 
     @add_start_docstrings_to_model_forward(BERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
     @add_code_sample_docstrings(
@@ -1512,6 +1563,9 @@ class BertForSequenceClassification(BertPreTrainedModel):
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
+        loss_mask=None,
+        loss_reduction="mean", # 没用了
+        loss_type="bce" # 没用了
     ):
         r"""
         labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`):
@@ -1519,6 +1573,9 @@ class BertForSequenceClassification(BertPreTrainedModel):
             config.num_labels - 1]`. If :obj:`config.num_labels == 1` a regression loss is computed (Mean-Square loss),
             If :obj:`config.num_labels > 1` a classification loss is computed (Cross-Entropy).
         """
+        del loss_type
+        del loss_reduction
+        # self.counter += 1
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         outputs = self.bert(
@@ -1532,6 +1589,7 @@ class BertForSequenceClassification(BertPreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
+        # print("\tIn Model: input size: {}\tdevice: {}".format(input_ids.size(), input_ids.device))
 
         pooled_output = outputs[1]
 
@@ -1539,27 +1597,32 @@ class BertForSequenceClassification(BertPreTrainedModel):
         logits = self.classifier(pooled_output)
 
         loss = None
-        if labels is not None:
-            if self.config.problem_type is None:
+        if labels is not None: 
+            if self.config.problem_type == "regression": # 没用
+                loss_fct = MSELoss(reduction=loss_reduction)  # 默认为mean
                 if self.num_labels == 1:
-                    self.config.problem_type = "regression"
-                elif self.num_labels > 1 and (labels.dtype == torch.long or labels.dtype == torch.int):
-                    self.config.problem_type = "single_label_classification"
-                else:
-                    self.config.problem_type = "multi_label_classification"
-
-            if self.config.problem_type == "regression":
-                loss_fct = MSELoss()
-                if self.num_labels == 1:
-                    loss = loss_fct(logits.squeeze(), labels.squeeze())
+                    loss = loss_fct(logits.squeeze(), labels.squeeze().float())
                 else:
                     loss = loss_fct(logits, labels)
             elif self.config.problem_type == "single_label_classification":
-                loss_fct = CrossEntropyLoss()
-                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+                # if loss_type == "bce":  # num_labels=1
+                    # loss_fct = BCEWithLogitsLoss(reduction=loss_reduction)
+                    # loss = loss_fct(logits.squeeze(1), labels.squeeze(1))
+                    # loss = loss_fct(logits.squeeze(1), labels.type_as(logits))  # one-hot转化为scalar BCEWithLogitsLoss对于inputs的要求与CrossEntropyLoss不同
+                # elif loss_type == "ce":  # num_labels=3
+                loss_fct = CrossEntropyLoss(reduction="mean")
+                loss = loss_fct(logits, torch.argmax(labels, dim=1).long())  # one-hot转化为scalar
+                # else:
+                    # raise RuntimeError("未知loss_type...")
             elif self.config.problem_type == "multi_label_classification":
-                loss_fct = BCEWithLogitsLoss()
+                loss_fct = BCEWithLogitsLoss(reduction="none")
                 loss = loss_fct(logits, labels)
+                if loss_mask is not None:
+                    loss = loss * loss_mask
+                    loss = torch.sum(loss) / torch.sum(loss_mask)  # 平均每个有效的loss的均值
+                else:
+                    loss = torch.mean(loss)
+        # return_dict = False
         if not return_dict:
             output = (logits,) + outputs[2:]
             return ((loss,) + output) if loss is not None else output
@@ -1827,8 +1890,11 @@ class BertForQuestionAnswering(BertPreTrainedModel):
 
         sequence_output = outputs[0]
 
+        # [B, S, 2]
         logits = self.qa_outputs(sequence_output)
+        # [B, S, 2]-->[B, S, 1]+[B, S, 1]
         start_logits, end_logits = logits.split(1, dim=-1)
+        # [B, S, 1]-->[B, S]
         start_logits = start_logits.squeeze(-1).contiguous()
         end_logits = end_logits.squeeze(-1).contiguous()
 
@@ -1840,11 +1906,12 @@ class BertForQuestionAnswering(BertPreTrainedModel):
             if len(end_positions.size()) > 1:
                 end_positions = end_positions.squeeze(-1)
             # sometimes the start/end positions are outside our model inputs, we ignore these terms
-            ignored_index = start_logits.size(1)
+            ignored_index = start_logits.size(1)  # 512
             start_positions = start_positions.clamp(0, ignored_index)
             end_positions = end_positions.clamp(0, ignored_index)
 
             loss_fct = CrossEntropyLoss(ignore_index=ignored_index)
+            # [B, S]&[B]-->[]
             start_loss = loss_fct(start_logits, start_positions)
             end_loss = loss_fct(end_logits, end_positions)
             total_loss = (start_loss + end_loss) / 2

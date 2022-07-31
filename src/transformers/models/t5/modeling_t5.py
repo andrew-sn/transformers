@@ -400,11 +400,15 @@ class T5Attention(nn.Module):
             key_length, dtype=torch.long, device=self.relative_attention_bias.weight.device
         )[None, :]
         relative_position = memory_position - context_position  # shape (query_length, key_length)
+        # [query_length, key_length]
         relative_position_bucket = self._relative_position_bucket(
             relative_position,  # shape (query_length, key_length)
             bidirectional=(not self.is_decoder),
             num_buckets=self.relative_attention_num_buckets,
         )
+        # embedding: [relative_attention_num_buckets, num_heads]
+        # [query_length, key_length]->[query_length, key_length, num_heads]
+        # 相当于给每一个head的每一个相对位置设置一个scalar
         values = self.relative_attention_bias(relative_position_bucket)  # shape (query_length, key_length, num_heads)
         values = values.permute([2, 0, 1]).unsqueeze(0)  # shape (1, num_heads, query_length, key_length)
         return values

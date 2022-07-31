@@ -595,6 +595,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
             self._tie_encoder_decoder_weights(self.encoder, self.decoder, self.base_model_prefix)
 
         for module in self.modules():
+            # 实际上没有任何一个模块有_tie_weights函数 这里不会执行
             if hasattr(module, "_tie_weights"):
                 module._tie_weights()
 
@@ -679,6 +680,8 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
             output_embeddings.weight = input_embeddings.weight
 
         if getattr(output_embeddings, "bias", None) is not None:
+            # 因为前面将input_embeddings.weight赋予给了output_embeddings.weight
+            # 这里bias需要做相应的适配
             output_embeddings.bias.data = nn.functional.pad(
                 output_embeddings.bias.data,
                 (
@@ -1387,6 +1390,8 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
                 ignore_mismatched_sizes=ignore_mismatched_sizes,
                 _fast_init=_fast_init,
             )
+            # 不加载预训练模型
+            pass
 
         # make sure token embedding weights are still tied if needed
         model.tie_weights()

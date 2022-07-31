@@ -145,6 +145,7 @@ class TFXLNetRelativeAttention(tf.keras.layers.Layer):
             ef = 0
         else:
             ef = tf.einsum("ibnd,snd->ibns", q_head + self.r_s_bias, self.seg_embed)
+            seg_mat = tf.cast(seg_mat, ef.dtype)
             ef = tf.einsum("ijbs,ibns->ijbn", seg_mat, ef)
 
         # merge attention scores and perform masking
@@ -154,6 +155,7 @@ class TFXLNetRelativeAttention(tf.keras.layers.Layer):
             if attn_mask.dtype == tf.float16 or attn_mask.dtype == tf.bfloat16:
                 attn_score = attn_score - 65500 * attn_mask
             else:
+                attn_mask = tf.cast(attn_mask, attn_score.dtype)
                 attn_score = attn_score - 1e30 * attn_mask
 
         # attention probability
@@ -246,6 +248,7 @@ class TFXLNetRelativeAttention(tf.keras.layers.Layer):
 
             # core attention ops
             if target_mapping is not None:
+                target_mapping = tf.cast(target_mapping, q_head_g.dtype)
                 q_head_g = tf.einsum("mbnd,mlb->lbnd", q_head_g, target_mapping)
                 attn_vec_g = self.rel_attn_core(
                     q_head_g,

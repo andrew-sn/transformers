@@ -403,6 +403,13 @@ class PreTrainedTokenizerFast(PreTrainedTokenizerBase):
             pad_to_multiple_of=pad_to_multiple_of,
         )
 
+        # encodings: list of <class 'tokenizers.Encoding'> 已经包含了offsets 不会将前后两个[UNK]合并
+        # ids: 输入到模型的token, type_ids: tokens_type_ids, 
+        # tokens: ids对应的token, offsets: 每一个ids在原文中的位置, 
+        # attention_mask, special_tokens_mask: 对于[CLS]/[SEP]/[PAD]的位置都置为1 其余为0,
+        # overflowing: list of <class 'tokenizers.Encoding'>会将第二句话被截断的部分构成一个新的tokenizers.Encoding
+        # 注意: 原始文本的tokenizers.Encoding由于文本过长会带有非空的overflowing 但其内部的overflowing的overflowing均为空
+        # overflowing不会嵌套 这与下面self._convert_encoding对于overflowing的处理逻辑有关
         encodings = self._tokenizer.encode_batch(
             batch_text_or_text_pairs,
             add_special_tokens=add_special_tokens,
@@ -436,8 +443,9 @@ class PreTrainedTokenizerFast(PreTrainedTokenizerBase):
         # To match each overflowing sample with the original sample in the batch
         # we add an overflow_to_sample_mapping array (see below)
         sanitized_tokens = {}
-        for key in tokens_and_encodings[0][0].keys():
-            stack = [e for item, _ in tokens_and_encodings for e in item[key]]
+        # keys: dict_keys(['input_ids', 'token_type_ids', 'attention_mask', 'offset_mapping'])
+        for key in tokens_and_encodings[0][0].keys():  # 取第0个样本的内容
+            stack = [e for item, _ in tokens_and_encodings for e in item[key]]  # 将所有样本的key内容取出
             sanitized_tokens[key] = stack
         sanitized_encodings = [e for _, item in tokens_and_encodings for e in item]
 

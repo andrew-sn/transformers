@@ -23,7 +23,7 @@ import numpy as np
 import torch
 import torch.utils.checkpoint
 from torch import nn
-from torch.nn import CrossEntropyLoss, MSELoss
+from torch.nn import CrossEntropyLoss, MSELoss, BCEWithLogitsLoss
 
 from ...activations import ACT2FN
 from ...file_utils import (
@@ -83,15 +83,24 @@ class RoFormerSinusoidalPositionalEmbedding(nn.Embedding):
         Identical to the XLM create_sinusoidal_embeddings except features are not interleaved. The cos features are in
         the 2nd half of the vector. [dim // 2:]
         """
+        # dim: size_per_head
         n_pos, dim = out.shape
+        # [2 * (j // 2) for j in range(64)]: [0, 0, 2, 2, 4, 4, 6, 6, 8, 8, 10, 10, ...]
+        # [2 * (j // 2) / 64 for j in range(64)]: [0.0, 0.0, 0.03125, 0.03125, 0.0625, 0.0625, 0.09375, 0.09375, 0.125, 0.125, 0.15625, 0.15625, ...]
+        # 这样设计的目标是: 下面取奇数位 与 偶数位 position_enc的值是一样的
+        # [seq_len, size_per_head] 每一行是该pos位置的编码
+        # pos=20那一行的数值 是 pos=1那一行数值 的 20倍 给人的感觉: 更大的位置编码 其数值之间变化的幅度 越大->更大的位置 偏向于的到更大的数
         position_enc = np.array(
             [[pos / np.power(10000, 2 * (j // 2) / dim) for j in range(dim)] for pos in range(n_pos)]
         )
         out.requires_grad = False  # set early to avoid an error in pytorch-1.8+
         sentinel = dim // 2 if dim % 2 == 0 else (dim // 2) + 1
+        # position_enc[:, 0::2]: 取偶数位 并 放到out的前一半
         out[:, 0:sentinel] = torch.FloatTensor(np.sin(position_enc[:, 0::2]))
+        # position_enc[:, 1::2]: 取奇数位 并 放到out的后一半
         out[:, sentinel:] = torch.FloatTensor(np.cos(position_enc[:, 1::2]))
         out.detach_()
+        # [seq_len, size_per_head]
         return out
 
     @torch.no_grad()
@@ -326,18 +335,27 @@ class RoFormerSelfAttention(nn.Module):
 
     @staticmethod
     def apply_rotary_position_embeddings(sinusoidal_pos, query_layer, key_layer, value_layer=None):
+        # sinusoidal_pos: [1, 1, seq_len, size_per_head]
+        # query_layer: [bsz, num_heads, seq_len, size_per_head]
         # https://kexue.fm/archives/8265
         # sin [batch_size, num_heads, sequence_length, embed_size_per_head//2]
         # cos [batch_size, num_heads, sequence_length, embed_size_per_head//2]
+        # [1, 1, seq_len, size_per_head]-->2*[1, 1, seq_len, size_per_head/2] 就是按照之前拼sin&cos的逻辑将两者拆出来
         sin, cos = sinusoidal_pos.chunk(2, dim=-1)
         # sin [θ0,θ1,θ2......θd/2-1] -> sin_pos [θ0,θ0,θ1,θ1,θ2,θ2......θd/2-1,θd/2-1]
+        # [1, 1, seq_len, size_per_head//2]-->[1, 1, seq_len, size_per_head]
         sin_pos = torch.stack([sin, sin], dim=-1).reshape_as(sinusoidal_pos)
         # cos [θ0,θ1,θ2......θd/2-1] -> cos_pos [θ0,θ0,θ1,θ1,θ2,θ2......θd/2-1,θd/2-1]
         cos_pos = torch.stack([cos, cos], dim=-1).reshape_as(sinusoidal_pos)
         # rotate_half_query_layer [-q1,q0,-q3,q2......,-qd-1,qd-2]
+        # [bsz, num_heads, seq_len, size_per_head]-->[bsz, num_heads, seq_len, size_per_head//2, 2]-->[bsz, num_heads, seq_len, size_per_head]
+        # 奇数位在前 偶数位在后 奇数位有负号
         rotate_half_query_layer = torch.stack([-query_layer[..., 1::2], query_layer[..., ::2]], dim=-1).reshape_as(
             query_layer
         )
+        # [bsz, num_heads, seq_len, size_per_head]*[1, 1, seq_len, size_per_head] + [bsz, num_heads, seq_len, size_per_head]*[1, 1, seq_len, size_per_head]
+        # -->[bsz, num_heads, seq_len, size_per_head]
+        # 关键步骤: query_layer从此由 词向量 转化为 带有绝对位置信息的向量 
         query_layer = query_layer * cos_pos + rotate_half_query_layer * sin_pos
         # rotate_half_key_layer [-k1,k0,-k3,k2......,-kd-1,kd-2]
         rotate_half_key_layer = torch.stack([-key_layer[..., 1::2], key_layer[..., ::2]], dim=-1).reshape_as(key_layer)
@@ -491,7 +509,6 @@ class RoFormerLayer(nn.Module):
             past_key_value=self_attn_past_key_value,
         )
         attention_output = self_attention_outputs[0]
-
         # if decoder, the last output is tuple of self-attn cache
         if self.is_decoder:
             outputs = self_attention_outputs[1:-1]
@@ -788,6 +805,21 @@ ROFORMER_INPUTS_DOCSTRING = r"""
 """
 
 
+class BertPooler(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        self.activation = nn.Tanh()
+
+    def forward(self, hidden_states):
+        # We "pool" the model by simply taking the hidden state corresponding
+        # to the first token.
+        first_token_tensor = hidden_states[:, 0]
+        pooled_output = self.dense(first_token_tensor)
+        pooled_output = self.activation(pooled_output)
+        return pooled_output
+
+
 @add_start_docstrings(
     "The bare RoFormer Model transformer outputting raw hidden-states without any specific head on top.",
     ROFORMER_START_DOCSTRING,
@@ -815,6 +847,7 @@ class RoFormerModel(RoFormerPreTrainedModel):
             self.embeddings_project = nn.Linear(config.embedding_size, config.hidden_size)
 
         self.encoder = RoFormerEncoder(config)
+        self.pooler = BertPooler(config)
 
         self.init_weights()
 
@@ -926,6 +959,7 @@ class RoFormerModel(RoFormerPreTrainedModel):
         # and head_mask is converted to shape [num_hidden_layers x batch x num_heads x seq_length x seq_length]
         head_mask = self.get_head_mask(head_mask, self.config.num_hidden_layers)
 
+        # 没有位置信息
         embedding_output = self.embeddings(
             input_ids=input_ids, token_type_ids=token_type_ids, inputs_embeds=inputs_embeds
         )
@@ -945,12 +979,13 @@ class RoFormerModel(RoFormerPreTrainedModel):
             return_dict=return_dict,
         )
         sequence_output = encoder_outputs[0]
-
+        pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
         if not return_dict:
-            return (sequence_output,) + encoder_outputs[1:]
+            return (sequence_output, pooled_output) + encoder_outputs[1:]
 
         return BaseModelOutputWithPastAndCrossAttentions(
             last_hidden_state=sequence_output,
+            pooler_output=pooled_output,
             past_key_values=encoder_outputs.past_key_values,
             hidden_states=encoder_outputs.hidden_states,
             attentions=encoder_outputs.attentions,
@@ -1027,7 +1062,7 @@ class RoFormerForMaskedLM(RoFormerPreTrainedModel):
 
         masked_lm_loss = None
         if labels is not None:
-            loss_fct = CrossEntropyLoss()  # -100 index = padding token
+            loss_fct = CrossEntropyLoss(reduction="mean", ignore_index=-100)  # -100 index = padding token
             masked_lm_loss = loss_fct(prediction_scores.view(-1, self.config.vocab_size), labels.view(-1))
 
         if not return_dict:
@@ -1037,6 +1072,122 @@ class RoFormerForMaskedLM(RoFormerPreTrainedModel):
         return MaskedLMOutput(
             loss=masked_lm_loss,
             logits=prediction_scores,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
+    def prepare_inputs_for_generation(self, input_ids, attention_mask=None, **model_kwargs):
+        input_shape = input_ids.shape
+        effective_batch_size = input_shape[0]
+
+        #  add a dummy token
+        assert self.config.pad_token_id is not None, "The PAD token should be defined for generation"
+        attention_mask = torch.cat([attention_mask, attention_mask.new_zeros((attention_mask.shape[0], 1))], dim=-1)
+        dummy_token = torch.full(
+            (effective_batch_size, 1), self.config.pad_token_id, dtype=torch.long, device=input_ids.device
+        )
+        input_ids = torch.cat([input_ids, dummy_token], dim=1)
+
+        return {"input_ids": input_ids, "attention_mask": attention_mask}
+
+
+class RoFormerPreTrainingHeads(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.predictions = RoFormerLMPredictionHead(config)
+        self.seq_relationship = nn.Linear(config.hidden_size, 2)
+
+    def forward(self, sequence_output, pooled_output):
+        prediction_scores = self.predictions(sequence_output)
+        seq_relationship_score = self.seq_relationship(pooled_output)
+        return prediction_scores, seq_relationship_score
+
+
+@add_start_docstrings("""RoFormer Model with a `language modeling` head on top. """, ROFORMER_START_DOCSTRING)
+class RoFormerForPreTraining(RoFormerPreTrainedModel):
+    def __init__(self, config):
+        super().__init__(config)
+
+        if config.is_decoder:
+            logger.warning(
+                "If you want to use `RoFormerForMaskedLM` make sure `config.is_decoder=False` for "
+                "bi-directional self-attention."
+            )
+
+        self.roformer = RoFormerModel(config)
+        self.cls = RoFormerPreTrainingHeads(config)
+
+        self.init_weights()
+
+    def get_output_embeddings(self):
+        return self.cls.predictions.decoder
+
+    def set_output_embeddings(self, new_embeddings):
+        self.cls.predictions.decoder = new_embeddings
+
+    # @add_start_docstrings_to_model_forward(ROFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
+    # @add_code_sample_docstrings(
+    #     tokenizer_class=_TOKENIZER_FOR_DOC,
+    #     checkpoint=_CHECKPOINT_FOR_DOC,
+    #     output_type=MaskedLMOutput,
+    #     config_class=_CONFIG_FOR_DOC,
+    # )
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        token_type_ids=None,
+        head_mask=None,
+        inputs_embeds=None,
+        encoder_hidden_states=None,
+        encoder_attention_mask=None,
+        labels=None,
+        next_sentence_label=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+    ):
+        r"""
+        labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
+            Labels for computing the masked language modeling loss. Indices should be in ``[-100, 0, ...,
+            config.vocab_size]`` (see ``input_ids`` docstring) Tokens with indices set to ``-100`` are ignored
+            (masked), the loss is only computed for the tokens with labels in ``[0, ..., config.vocab_size]``.
+        """
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        outputs = self.roformer(
+            input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+        sequence_output, pooled_output = outputs[:2]
+        prediction_scores, seq_relationship_score = self.cls(sequence_output, pooled_output)
+
+        total_loss, masked_lm_loss, next_sentence_loss = None, None, None
+        if labels is not None and next_sentence_label is not None:
+            loss_fct = CrossEntropyLoss(reduction="mean", ignore_index=-100)  # -100 index = padding token
+            masked_lm_loss = loss_fct(prediction_scores.view(-1, self.config.vocab_size), labels.view(-1))
+            next_sentence_loss = loss_fct(seq_relationship_score.view(-1, 2), next_sentence_label.view(-1))
+            total_loss = masked_lm_loss + next_sentence_loss
+
+        if not return_dict:
+            output = (prediction_scores, seq_relationship_score) + outputs[2:]
+            return ((total_loss,) + output) if total_loss is not None else output
+
+        return MaskedLMOutput(
+            loss=total_loss,
+            masked_lm_loss=masked_lm_loss,
+            next_sentence_loss=next_sentence_loss,
+            prediction_logits=prediction_scores,
+            seq_relationship_logits=seq_relationship_score,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
@@ -1204,10 +1355,12 @@ class RoFormerForCausalLM(RoFormerPreTrainedModel):
 
 class RoFormerClassificationHead(nn.Module):
     """Head for sentence-level classification tasks."""
+    # 经过了修正 参数量与bert对齐
 
     def __init__(self, config):
         super().__init__()
-        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        # 其实这里不应该被注释掉的 因为在RoFormer的主层里 是没有pooler层的 所以需要加上这一层dense才算与bert对齐
+        # self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.out_proj = nn.Linear(config.hidden_size, config.num_labels)
 
@@ -1216,9 +1369,9 @@ class RoFormerClassificationHead(nn.Module):
     def forward(self, features, **kwargs):
         x = features[:, 0, :]  # take <s> token (equiv. to [CLS])
         x = self.dropout(x)
-        x = self.dense(x)
-        x = ACT2FN[self.config.hidden_act](x)
-        x = self.dropout(x)
+        # x = self.dense(x)
+        # x = ACT2FN[self.config.hidden_act](x)
+        # x = self.dropout(x)
         x = self.out_proj(x)
         return x
 
@@ -1257,6 +1410,9 @@ class RoFormerForSequenceClassification(RoFormerPreTrainedModel):
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
+        loss_mask=None,
+        loss_reduction="mean",
+        loss_type="bce"
     ):
         r"""
         labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`):
@@ -1286,10 +1442,12 @@ class RoFormerForSequenceClassification(RoFormerPreTrainedModel):
                 #  We are doing regression
                 loss_fct = MSELoss()
                 loss = loss_fct(logits.view(-1), labels.view(-1))
-            else:
-                loss_fct = CrossEntropyLoss()
-                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
-
+            else:  # 直接修改源码 适用于多标签
+                if loss_type == "bce":
+                    loss_fct = BCEWithLogitsLoss(reduction=loss_reduction)
+                    loss = loss_fct(logits, labels)
+                    loss = loss * loss_mask
+                    loss = torch.sum(loss) / torch.sum(loss_mask)  # 平均每个有效的loss的均值
         if not return_dict:
             output = (logits,) + outputs[1:]
             return ((loss,) + output) if loss is not None else output

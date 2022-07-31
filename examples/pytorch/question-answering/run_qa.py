@@ -62,10 +62,12 @@ class ModelArguments:
     """
 
     model_name_or_path: str = field(
+        default="/data3/liusunan/pretrained_model/huggingface/bert-base-uncased",
         metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
     )
     config_name: Optional[str] = field(
-        default=None, metadata={"help": "Pretrained config name or path if not the same as model_name"}
+        default="/data3/liusunan/pretrained_model/huggingface/bert-base-uncased/config.json",
+        metadata={"help": "Pretrained config name or path if not the same as model_name"}
     )
     tokenizer_name: Optional[str] = field(
         default=None, metadata={"help": "Pretrained tokenizer name or path if not the same as model_name"}
@@ -92,9 +94,11 @@ class DataTrainingArguments:
     """
     Arguments pertaining to what data we are going to input our model for training and eval.
     """
-
+    # output_dir: Optional[str] = field(
+    #     default="/data3/liusunan/LM_exp/2022.q2.exp1/exp1.2.0/finetune/tmp", metadata={"help": "The name of the dataset to use (via the datasets library)."}
+    # )
     dataset_name: Optional[str] = field(
-        default=None, metadata={"help": "The name of the dataset to use (via the datasets library)."}
+        default="squad", metadata={"help": "The name of the dataset to use (via the datasets library)."}
     )
     dataset_config_name: Optional[str] = field(
         default=None, metadata={"help": "The configuration name of the dataset to use (via the datasets library)."}
@@ -116,7 +120,8 @@ class DataTrainingArguments:
         metadata={"help": "The number of processes to use for the preprocessing."},
     )
     max_seq_length: int = field(
-        default=384,
+        # default=384,
+        default=512,
         metadata={
             "help": "The maximum total input sequence length after tokenization. Sequences longer "
             "than this will be truncated, sequences shorter will be padded."
@@ -326,7 +331,6 @@ def main():
     question_column_name = "question" if "question" in column_names else column_names[0]
     context_column_name = "context" if "context" in column_names else column_names[1]
     answer_column_name = "answers" if "answers" in column_names else column_names[2]
-
     # Padding side determines if we do (question|context) or (context|question).
     pad_on_right = tokenizer.padding_side == "right"
 
@@ -363,22 +367,27 @@ def main():
         sample_mapping = tokenized_examples.pop("overflow_to_sample_mapping")
         # The offset mappings will give us a map from token to character position in the original context. This will
         # help us compute the start_positions and end_positions.
+        # 在overflow部分 其对应的offset_mapping是根据原文来的 即在context部分已添加offset
         offset_mapping = tokenized_examples.pop("offset_mapping")
 
         # Let's label those examples!
         tokenized_examples["start_positions"] = []
         tokenized_examples["end_positions"] = []
 
+        # offsets: 记录了每个token对应原文的位置
         for i, offsets in enumerate(offset_mapping):
             # We will label impossible answers with the index of the CLS token.
             input_ids = tokenized_examples["input_ids"][i]
             cls_index = input_ids.index(tokenizer.cls_token_id)
 
             # Grab the sequence corresponding to that example (to know what is the context and what is the question).
+            # 0: question
+            # 1: context
+            # None: [CLS]/[SEP]/[PAD]
             sequence_ids = tokenized_examples.sequence_ids(i)
 
             # One example can give several spans, this is the index of the example containing this span of text.
-            sample_index = sample_mapping[i]
+            sample_index = sample_mapping[i]  # 获得这一条case对应的真实数据的编号
             answers = examples[answer_column_name][sample_index]
             # If no answers are given, set the cls_index as answer.
             if len(answers["answer_start"]) == 0:
@@ -386,33 +395,39 @@ def main():
                 tokenized_examples["end_positions"].append(cls_index)
             else:
                 # Start/end character index of the answer in the text.
-                start_char = answers["answer_start"][0]
-                end_char = start_char + len(answers["text"][0])
+                start_char = answers["answer_start"][0]  # 基于char的开始位置 包含该位置的char
+                end_char = start_char + len(answers["text"][0])  # 基于char的结束位置 不包含该位置的char
 
                 # Start token index of the current span in the text.
+                # 当pad_on_right=True context在右边 且 context的位置为1
+                # 获取第一个context的位置
                 token_start_index = 0
                 while sequence_ids[token_start_index] != (1 if pad_on_right else 0):
                     token_start_index += 1
 
                 # End token index of the current span in the text.
+                # 获取最后一个context的位置
                 token_end_index = len(input_ids) - 1
                 while sequence_ids[token_end_index] != (1 if pad_on_right else 0):
                     token_end_index -= 1
 
                 # Detect if the answer is out of the span (in which case this feature is labeled with the CLS index).
-                if not (offsets[token_start_index][0] <= start_char and offsets[token_end_index][1] >= end_char):
+                # offsets: (start, end) 其中start为开始char的index end-1为结束char的index（与end_char表述相同）
+                # 所以下面两处均包含=
+                if not (offsets[token_start_index][0] <= start_char and offsets[token_end_index][1] >= end_char):  # 不包含答案的情况
                     tokenized_examples["start_positions"].append(cls_index)
                     tokenized_examples["end_positions"].append(cls_index)
-                else:
+                else:  # 包含答案的情况
                     # Otherwise move the token_start_index and token_end_index to the two ends of the answer.
                     # Note: we could go after the last offset if the answer is the last word (edge case).
+                    # 这里右边的条件有等号 是因为下面存在token_start_index - 1的操作
+                    # 当标准答案开始&结束的char位于token的中间时（即不会出现等号的情况）这时 仍然是能训练的 只是会影响inference时输出结果的可读性-->一个合理的词表很重要
                     while token_start_index < len(offsets) and offsets[token_start_index][0] <= start_char:
                         token_start_index += 1
                     tokenized_examples["start_positions"].append(token_start_index - 1)
                     while offsets[token_end_index][1] >= end_char:
                         token_end_index -= 1
                     tokenized_examples["end_positions"].append(token_end_index + 1)
-
         return tokenized_examples
 
     if training_args.do_train:
@@ -463,6 +478,7 @@ def main():
 
         # For evaluation, we will need to convert our predictions to substrings of the context, so we keep the
         # corresponding example_id and we will store the offset mappings.
+        # 存放该位置原始文本的token_id
         tokenized_examples["example_id"] = []
 
         for i in range(len(tokenized_examples["input_ids"])):
@@ -476,6 +492,7 @@ def main():
 
             # Set to None the offset_mapping that are not part of the context so it's easy to determine if a token
             # position is part of the context or not.
+            # 与下面metrics的逻辑有关
             tokenized_examples["offset_mapping"][i] = [
                 (o if sequence_ids[k] == context_index else None)
                 for k, o in enumerate(tokenized_examples["offset_mapping"][i])

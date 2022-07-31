@@ -656,6 +656,19 @@ class TFBertMainLayer(tf.keras.layers.Layer):
         # this attention mask is more simple than the triangular masking of causal attention
         # used in OpenAI GPT, we just need to prepare the broadcast dimension here.
         extended_attention_mask = tf.reshape(inputs["attention_mask"], (input_shape[0], 1, 1, input_shape[1]))
+        """
+        seq_len = extended_attention_mask.shape[-1]
+        extended_attention_mask = tf.tile(extended_attention_mask, [1, 1, seq_len, 1])
+        # 文本不可以attent到[CLS]
+        # [S, S-1]
+        cls_attent_mask_part1 = tf.ones([seq_len, seq_len-1], dtype=extended_attention_mask.dtype)
+        # [S, 1]
+        cls_attent_mask_part2 = tf.concat([tf.ones([1, 1], dtype=extended_attention_mask.dtype),
+                                           tf.zeros([seq_len-1, 1], dtype=extended_attention_mask.dtype)],
+                                          axis=0)
+        cls_attent_mask = tf.concat([cls_attent_mask_part2, cls_attent_mask_part1], axis=1)
+        extended_attention_mask = extended_attention_mask * cls_attent_mask[None, None]
+        """
 
         # Since attention_mask is 1.0 for positions we want to attend and 0.0 for
         # masked positions, this operation will create a tensor which is 0.0 for
