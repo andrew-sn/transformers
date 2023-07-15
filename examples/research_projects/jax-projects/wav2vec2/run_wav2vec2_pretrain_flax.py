@@ -6,18 +6,18 @@ from dataclasses import field
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
-import numpy as np
-from datasets import DatasetDict, load_dataset
-from tqdm import tqdm
-
 import flax
 import jax
 import jax.numpy as jnp
 import librosa
+import numpy as np
 import optax
+from datasets import DatasetDict, load_dataset
 from flax import jax_utils, traverse_util
 from flax.training import train_state
 from flax.training.common_utils import get_metrics, onehot, shard
+from tqdm import tqdm
+
 from transformers import (
     FlaxWav2Vec2ForPreTraining,
     HfArgumentParser,
@@ -591,7 +591,7 @@ def main():
 
         # get eval metrics
         eval_metrics = get_metrics(eval_metrics)
-        eval_metrics = jax.tree_map(jnp.mean, eval_metrics)
+        eval_metrics = jax.tree_util.tree_map(jnp.mean, eval_metrics)
 
         # Update progress bar
         epochs.write(
@@ -606,7 +606,7 @@ def main():
 
         # save checkpoint after each epoch and push checkpoint to the hub
         if jax.process_index() == 0:
-            params = jax.device_get(jax.tree_map(lambda x: x[0], state.params))
+            params = jax.device_get(jax.tree_util.tree_map(lambda x: x[0], state.params))
             model.save_pretrained(training_args.output_dir, params=params, push_to_hub=training_args.push_to_hub)
 
 

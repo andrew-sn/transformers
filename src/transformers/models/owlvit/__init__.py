@@ -1,7 +1,3 @@
-# flake8: noqa
-# There's no way to ignore "F401 '...' imported but unused" warnings in this
-# module, but to preserve other warnings. So, don't check this module at all.
-
 # Copyright 2022 The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -32,6 +28,7 @@ _import_structure = {
     "configuration_owlvit": [
         "OWLVIT_PRETRAINED_CONFIG_ARCHIVE_MAP",
         "OwlViTConfig",
+        "OwlViTOnnxConfig",
         "OwlViTTextConfig",
         "OwlViTVisionConfig",
     ],
@@ -46,6 +43,7 @@ except OptionalDependencyNotAvailable:
     pass
 else:
     _import_structure["feature_extraction_owlvit"] = ["OwlViTFeatureExtractor"]
+    _import_structure["image_processing_owlvit"] = ["OwlViTImageProcessor"]
 
 try:
     if not is_torch_available():
@@ -66,6 +64,7 @@ if TYPE_CHECKING:
     from .configuration_owlvit import (
         OWLVIT_PRETRAINED_CONFIG_ARCHIVE_MAP,
         OwlViTConfig,
+        OwlViTOnnxConfig,
         OwlViTTextConfig,
         OwlViTVisionConfig,
     )
@@ -78,6 +77,7 @@ if TYPE_CHECKING:
         pass
     else:
         from .feature_extraction_owlvit import OwlViTFeatureExtractor
+        from .image_processing_owlvit import OwlViTImageProcessor
 
     try:
         if not is_torch_available():

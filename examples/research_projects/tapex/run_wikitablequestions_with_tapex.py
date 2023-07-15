@@ -31,9 +31,9 @@ import nltk  # Here to have a nice missing dependency error message early on
 import numpy as np
 import pandas as pd
 from datasets import load_dataset
+from filelock import FileLock
 
 import transformers
-from filelock import FileLock
 from transformers import (
     AutoConfig,
     BartForConditionalGeneration,
@@ -102,7 +102,7 @@ class ModelArguments:
         default=False,
         metadata={
             "help": (
-                "Will use the token generated when running `transformers-cli login` (necessary to use this script "
+                "Will use the token generated when running `huggingface-cli login` (necessary to use this script "
                 "with private models)."
             )
         },

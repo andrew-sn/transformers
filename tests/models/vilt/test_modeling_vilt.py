@@ -26,6 +26,7 @@ from transformers.utils import cached_property
 
 from ...test_configuration_common import ConfigTester
 from ...test_modeling_common import ModelTesterMixin, floats_tensor, ids_tensor, random_attention_mask
+from ...test_pipeline_mixin import PipelineTesterMixin
 
 
 if is_torch_available():
@@ -214,8 +215,7 @@ class ViltModelTester:
 
 
 @require_torch
-class ViltModelTest(ModelTesterMixin, unittest.TestCase):
-
+class ViltModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
     all_model_classes = (
         (
             ViltModel,
@@ -226,6 +226,11 @@ class ViltModelTest(ModelTesterMixin, unittest.TestCase):
         )
         if is_torch_available()
         else ()
+    )
+    pipeline_model_mapping = (
+        {"feature-extraction": ViltModel, "visual-question-answering": ViltForQuestionAnswering}
+        if is_torch_available()
+        else {}
     )
     test_pruning = False
     test_headmasking = False
@@ -512,7 +517,6 @@ class ViltModelTest(ModelTesterMixin, unittest.TestCase):
 
 @require_torch
 class ViltForImagesAndTextClassificationModelTest(ViltModelTest, unittest.TestCase):
-
     all_model_classes = (ViltForImagesAndTextClassification,) if is_torch_available() else ()
 
     def setUp(self):

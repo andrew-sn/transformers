@@ -14,11 +14,11 @@
 # limitations under the License.
 """ Testing suite for the TensorFlow SegFormer model. """
 
+from __future__ import annotations
+
 import inspect
 import unittest
 from typing import List, Tuple
-
-import numpy as np
 
 from transformers import SegformerConfig
 from transformers.file_utils import is_tf_available, is_vision_available
@@ -26,9 +26,11 @@ from transformers.testing_utils import require_tf, slow
 
 from ...test_configuration_common import ConfigTester
 from ...test_modeling_tf_common import TFModelTesterMixin, floats_tensor, ids_tensor
+from ...test_pipeline_mixin import PipelineTesterMixin
 
 
 if is_tf_available():
+    import numpy as np
     import tensorflow as tf
 
     from transformers import TFSegformerForImageClassification, TFSegformerForSemanticSegmentation, TFSegformerModel
@@ -37,7 +39,7 @@ if is_tf_available():
 if is_vision_available():
     from PIL import Image
 
-    from transformers import SegformerFeatureExtractor
+    from transformers import SegformerImageProcessor
 
 
 class TFSegformerConfigTester(ConfigTester):
@@ -151,11 +153,16 @@ class TFSegformerModelTester:
 
 
 @require_tf
-class TFSegformerModelTest(TFModelTesterMixin, unittest.TestCase):
+class TFSegformerModelTest(TFModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
     all_model_classes = (
         (TFSegformerModel, TFSegformerForImageClassification, TFSegformerForSemanticSegmentation)
         if is_tf_available()
         else ()
+    )
+    pipeline_model_mapping = (
+        {"feature-extraction": TFSegformerModel, "image-classification": TFSegformerForImageClassification}
+        if is_tf_available()
+        else {}
     )
 
     test_head_masking = False
@@ -177,10 +184,6 @@ class TFSegformerModelTest(TFModelTesterMixin, unittest.TestCase):
 
     @unittest.skip("SegFormer does not have get_input_embeddings method and get_output_embeddings methods")
     def test_model_common_attributes(self):
-        pass
-
-    @unittest.skip("Test was written for TF 1.x and isn't really relevant here")
-    def test_compile_tf_model(self):
         pass
 
     def test_forward_signature(self):
@@ -289,7 +292,6 @@ class TFSegformerModelTest(TFModelTesterMixin, unittest.TestCase):
             check_hidden_states_output(inputs_dict, config, model_class)
 
     def test_model_outputs_equivalence(self):
-
         config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
 
         def check_equivalence(model, tuple_inputs, dict_inputs, additional_kwargs={}):
@@ -331,64 +333,30 @@ class TFSegformerModelTest(TFModelTesterMixin, unittest.TestCase):
 
             # todo: incorporate label support for semantic segmentation in `test_modeling_tf_common.py`.
 
+    @unittest.skipIf(
+        not is_tf_available() or len(tf.config.list_physical_devices("GPU")) == 0,
+        reason="TF does not support backprop for grouped convolutions on CPU.",
+    )
     def test_dataset_conversion(self):
-        gpus = tf.config.list_physical_devices("GPU")
-        # Grouped convs aren't supported on CPUs for backprop.
-        if len(gpus) >= 1:
-            super().test_dataset_conversion()
+        super().test_dataset_conversion()
 
+    def check_keras_fit_results(self, val_loss1, val_loss2, atol=2e-1, rtol=2e-1):
+        self.assertTrue(np.allclose(val_loss1, val_loss2, atol=atol, rtol=rtol))
+
+    @unittest.skipIf(
+        not is_tf_available() or len(tf.config.list_physical_devices("GPU")) == 0,
+        reason="TF does not support backprop for grouped convolutions on CPU.",
+    )
+    @slow
     def test_keras_fit(self):
         config, _ = self.model_tester.prepare_config_and_inputs_for_common()
-        gpus = tf.config.list_physical_devices("GPU")
-
-        def apply(model):
-            if getattr(model, "hf_compute_loss", None):
-                model_weights = model.get_weights()
-
-                # Test that model correctly compute the loss with kwargs
-                for_segmentation = True if model_class.__name__ == "TFSegformerForSemanticSegmentation" else False
-                _, prepared_for_class = self.model_tester.prepare_config_and_inputs_for_keras_fit(
-                    for_segmentation=for_segmentation
-                )
-
-                label_names = {"labels"}
-                self.assertGreater(len(label_names), 0, msg="No matching label names found!")
-                labels = {key: val for key, val in prepared_for_class.items() if key in label_names}
-                inputs_minus_labels = {key: val for key, val in prepared_for_class.items() if key not in label_names}
-                self.assertGreater(len(inputs_minus_labels), 0)
-                model.compile(optimizer=tf.keras.optimizers.SGD(0.0), run_eagerly=True)
-
-                # Make sure the model fits without crashing regardless of where we pass the labels
-                history1 = model.fit(
-                    prepared_for_class,
-                    validation_data=prepared_for_class,
-                    steps_per_epoch=1,
-                    validation_steps=1,
-                    shuffle=False,
-                )
-                val_loss1 = history1.history["val_loss"][0]
-
-                # We reinitialize the model here even though our learning rate was zero
-                # because BatchNorm updates weights by means other than gradient descent.
-                model.set_weights(model_weights)
-                history2 = model.fit(
-                    inputs_minus_labels,
-                    labels,
-                    validation_data=(inputs_minus_labels, labels),
-                    steps_per_epoch=1,
-                    validation_steps=1,
-                    shuffle=False,
-                )
-                val_loss2 = history2.history["val_loss"][0]
-                self.assertTrue(np.allclose(val_loss1, val_loss2, atol=1e-2, rtol=1e-3))
 
         for model_class in self.all_model_classes:
             # Since `TFSegformerModel` cannot operate with the default `fit()` method.
             if model_class.__name__ != "TFSegformerModel":
-                # Grouped convs and backprop with them isn't supported on CPUs.
                 model = model_class(config)
-                if len(gpus) > 1:
-                    apply(model)
+                if getattr(model, "hf_compute_loss", None):
+                    super().test_keras_fit()
 
     def test_loss_computation(self):
         config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
@@ -399,9 +367,7 @@ class TFSegformerModelTest(TFModelTesterMixin, unittest.TestCase):
             _, prepared_for_class = self.model_tester.prepare_config_and_inputs_for_keras_fit(
                 for_segmentation=for_segmentation
             )
-            added_label = prepared_for_class[
-                sorted(list(prepared_for_class.keys() - inputs_dict.keys()), reverse=True)[0]
-            ]
+            added_label = prepared_for_class[sorted(prepared_for_class.keys() - inputs_dict.keys(), reverse=True)[0]]
             loss_size = tf.size(added_label)
 
             # Test that model correctly compute the loss with kwargs
@@ -488,13 +454,13 @@ class TFSegformerModelIntegrationTest(unittest.TestCase):
     @slow
     def test_inference_image_segmentation_ade(self):
         # only resize + normalize
-        feature_extractor = SegformerFeatureExtractor(
+        image_processor = SegformerImageProcessor(
             image_scale=(512, 512), keep_ratio=False, align=False, do_random_crop=False
         )
         model = TFSegformerForSemanticSegmentation.from_pretrained("nvidia/segformer-b0-finetuned-ade-512-512")
 
         image = prepare_img()
-        encoded_inputs = feature_extractor(images=image, return_tensors="tf")
+        encoded_inputs = image_processor(images=image, return_tensors="tf")
         pixel_values = encoded_inputs.pixel_values
 
         outputs = model(pixel_values, training=False)
@@ -514,7 +480,7 @@ class TFSegformerModelIntegrationTest(unittest.TestCase):
     @slow
     def test_inference_image_segmentation_city(self):
         # only resize + normalize
-        feature_extractor = SegformerFeatureExtractor(
+        image_processor = SegformerImageProcessor(
             image_scale=(512, 512), keep_ratio=False, align=False, do_random_crop=False
         )
         model = TFSegformerForSemanticSegmentation.from_pretrained(
@@ -522,7 +488,7 @@ class TFSegformerModelIntegrationTest(unittest.TestCase):
         )
 
         image = prepare_img()
-        encoded_inputs = feature_extractor(images=image, return_tensors="tf")
+        encoded_inputs = image_processor(images=image, return_tensors="tf")
         pixel_values = encoded_inputs.pixel_values
 
         outputs = model(pixel_values, training=False)

@@ -15,8 +15,11 @@
 """ TF 2.0 Swin Transformer model."""
 
 
+from __future__ import annotations
+
 import collections.abc
 import math
+import warnings
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
@@ -47,7 +50,6 @@ logger = logging.get_logger(__name__)
 
 # General docstring
 _CONFIG_FOR_DOC = "SwinConfig"
-_FEAT_EXTRACTOR_FOR_DOC = "AutoFeatureExtractor"
 
 # Base docstring
 _CHECKPOINT_FOR_DOC = "microsoft/swin-tiny-patch4-window7-224"
@@ -95,9 +97,9 @@ class TFSwinEncoderOutput(ModelOutput):
     """
 
     last_hidden_state: tf.Tensor = None
-    hidden_states: Optional[Tuple[tf.Tensor]] = None
-    attentions: Optional[Tuple[tf.Tensor]] = None
-    reshaped_hidden_states: Optional[Tuple[tf.Tensor]] = None
+    hidden_states: Tuple[tf.Tensor] | None = None
+    attentions: Tuple[tf.Tensor] | None = None
+    reshaped_hidden_states: Tuple[tf.Tensor] | None = None
 
 
 @dataclass
@@ -130,10 +132,10 @@ class TFSwinModelOutput(ModelOutput):
     """
 
     last_hidden_state: tf.Tensor = None
-    pooler_output: Optional[tf.Tensor] = None
-    hidden_states: Optional[Tuple[tf.Tensor]] = None
-    attentions: Optional[Tuple[tf.Tensor]] = None
-    reshaped_hidden_states: Optional[Tuple[tf.Tensor]] = None
+    pooler_output: tf.Tensor | None = None
+    hidden_states: Tuple[tf.Tensor] | None = None
+    attentions: Tuple[tf.Tensor] | None = None
+    reshaped_hidden_states: Tuple[tf.Tensor] | None = None
 
 
 @dataclass
@@ -144,7 +146,7 @@ class TFSwinMaskedImageModelingOutput(ModelOutput):
     Args:
         loss (`tf.Tensor` of shape `(1,)`, *optional*, returned when `bool_masked_pos` is provided):
             Masked image modeling (MLM) loss.
-        logits (`tf.Tensor` of shape `(batch_size, num_channels, height, width)`):
+        reconstruction (`tf.Tensor` of shape `(batch_size, num_channels, height, width)`):
             Reconstructed pixel values.
         hidden_states (`tuple(tf.Tensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
             Tuple of `tf.Tensor` (one for the output of the embeddings + one for the output of each stage) of shape
@@ -165,11 +167,20 @@ class TFSwinMaskedImageModelingOutput(ModelOutput):
             include the spatial dimensions.
     """
 
-    loss: Optional[tf.Tensor] = None
-    logits: tf.Tensor = None
-    hidden_states: Optional[Tuple[tf.Tensor]] = None
-    attentions: Optional[Tuple[tf.Tensor]] = None
-    reshaped_hidden_states: Optional[Tuple[tf.Tensor]] = None
+    loss: tf.Tensor | None = None
+    reconstruction: tf.Tensor = None
+    hidden_states: Tuple[tf.Tensor] | None = None
+    attentions: Tuple[tf.Tensor] | None = None
+    reshaped_hidden_states: Tuple[tf.Tensor] | None = None
+
+    @property
+    def logits(self):
+        warnings.warn(
+            "logits attribute is deprecated and will be removed in version 5 of Transformers."
+            " Please use the reconstruction attribute to retrieve the final output instead.",
+            FutureWarning,
+        )
+        return self.reconstruction
 
 
 @dataclass
@@ -201,11 +212,11 @@ class TFSwinImageClassifierOutput(ModelOutput):
             include the spatial dimensions.
     """
 
-    loss: Optional[tf.Tensor] = None
+    loss: tf.Tensor | None = None
     logits: tf.Tensor = None
-    hidden_states: Optional[Tuple[tf.Tensor]] = None
-    attentions: Optional[Tuple[tf.Tensor]] = None
-    reshaped_hidden_states: Optional[Tuple[tf.Tensor]] = None
+    hidden_states: Tuple[tf.Tensor] | None = None
+    attentions: Tuple[tf.Tensor] | None = None
+    reshaped_hidden_states: Tuple[tf.Tensor] | None = None
 
 
 def window_partition(input_feature: tf.Tensor, window_size: int) -> tf.Tensor:
@@ -226,9 +237,9 @@ def window_reverse(windows: tf.Tensor, window_size: int, height: int, width: int
     """
     Merges windows to produce higher resolution features.
     """
-    x = shape_list(windows)[0]
+    x = tf.shape(windows)[0]
     y = tf.cast(height * width / (window_size * window_size), tf.int32)
-    batch_size = int(x / y)
+    batch_size = tf.math.floordiv(x, y)
     windows = tf.reshape(
         windows, (batch_size, height // window_size, width // window_size, window_size, window_size, -1)
     )
@@ -461,21 +472,6 @@ class TFSwinSelfAttention(tf.keras.layers.Layer):
             window_size if isinstance(window_size, collections.abc.Iterable) else (window_size, window_size)
         )
 
-        # get pair-wise relative position index for each token inside the window
-        coords_h = tf.range(self.window_size[0])
-        coords_w = tf.range(self.window_size[1])
-        coords = tf.stack(tf.meshgrid(coords_h, coords_w, indexing="ij"))
-        coords_flatten = tf.reshape(coords, (shape_list(coords)[0], -1))
-        relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]
-        relative_coords = tf.transpose(relative_coords, (1, 2, 0))
-
-        stack_0, stack_1 = tf.unstack(relative_coords, axis=2)
-        stack_0 += self.window_size[0] - 1
-        stack_0 *= 2 * self.window_size[1] - 1
-        stack_1 += self.window_size[1] - 1
-        relative_coords = tf.stack([stack_0, stack_1], axis=2)
-        self.relative_position_index = tf.reduce_sum(relative_coords, axis=-1)
-
         self.query = tf.keras.layers.Dense(
             self.all_head_size,
             kernel_initializer=get_initializer(config.initializer_range),
@@ -503,6 +499,28 @@ class TFSwinSelfAttention(tf.keras.layers.Layer):
             initializer="zeros",
             name="relative_position_bias_table",
         )
+        self.relative_position_index = self.add_weight(
+            shape=(self.window_size[0] ** 2, self.window_size[1] ** 2),
+            trainable=False,
+            dtype=tf.int32,
+            name="relative_position_index",
+        )
+
+        # get pair-wise relative position index for each token inside the window
+        coords_h = tf.range(self.window_size[0])
+        coords_w = tf.range(self.window_size[1])
+        coords = tf.stack(tf.meshgrid(coords_h, coords_w, indexing="ij"))
+        coords_flatten = tf.reshape(coords, (shape_list(coords)[0], -1))
+        relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]
+        relative_coords = tf.transpose(relative_coords, (1, 2, 0))
+
+        stack_0, stack_1 = tf.unstack(relative_coords, axis=2)
+        stack_0 += self.window_size[0] - 1
+        stack_0 *= 2 * self.window_size[1] - 1
+        stack_1 += self.window_size[1] - 1
+        relative_coords = tf.stack([stack_0, stack_1], axis=2)
+
+        self.relative_position_index.assign(tf.cast(tf.reduce_sum(relative_coords, axis=-1), tf.int32))
         super().build(input_shape)
 
     def transpose_for_scores(self, x: tf.Tensor) -> tf.Tensor:
@@ -513,8 +531,8 @@ class TFSwinSelfAttention(tf.keras.layers.Layer):
     def call(
         self,
         hidden_states: tf.Tensor,
-        attention_mask: Optional[tf.Tensor] = None,
-        head_mask: Optional[tf.Tensor] = None,
+        attention_mask: tf.Tensor | None = None,
+        head_mask: tf.Tensor | None = None,
         output_attentions: bool = False,
         training: bool = False,
     ) -> Tuple[tf.Tensor, ...]:
@@ -603,8 +621,8 @@ class TFSwinAttention(tf.keras.layers.Layer):
     def call(
         self,
         hidden_states: tf.Tensor,
-        attention_mask: Optional[tf.Tensor] = None,
-        head_mask: Optional[tf.Tensor] = None,
+        attention_mask: tf.Tensor | None = None,
+        head_mask: tf.Tensor | None = None,
         output_attentions: bool = False,
         training: bool = False,
     ) -> tf.Tensor:
@@ -667,7 +685,7 @@ class TFSwinLayer(tf.keras.layers.Layer):
         self.intermediate = TFSwinIntermediate(config, dim, name="intermediate")
         self.swin_output = TFSwinOutput(config, dim, name="output")
 
-    def get_attn_mask(self, height: int, width: int, window_size: int, shift_size: int) -> Optional[tf.Tensor]:
+    def get_attn_mask(self, height: int, width: int, window_size: int, shift_size: int) -> tf.Tensor | None:
         img_mask = tf.zeros((height, width))
         height_slices = ((0, -window_size), (-window_size, -shift_size), (-shift_size, -1))
         width_slices = ((0, -window_size), (-window_size, -shift_size), (-shift_size, -1))
@@ -688,16 +706,18 @@ class TFSwinLayer(tf.keras.layers.Layer):
         img_mask = tf.expand_dims(img_mask, -1)
         img_mask = tf.expand_dims(img_mask, 0)
 
-        mask_windows = window_partition(img_mask, self.window_size)
-        mask_windows = tf.reshape(mask_windows, (-1, self.window_size * self.window_size))
+        mask_windows = window_partition(img_mask, window_size)
+        mask_windows = tf.reshape(mask_windows, (-1, window_size * window_size))
         attn_mask = tf.expand_dims(mask_windows, 1) - tf.expand_dims(mask_windows, 2)
         attn_mask = tf.where(attn_mask != 0, float(-100.0), attn_mask)
         attn_mask = tf.where(attn_mask == 0, float(0.0), attn_mask)
         return attn_mask
 
-    def maybe_pad(self, hidden_states: tf.Tensor, height: int, width: int) -> Tuple[tf.Tensor, tf.Tensor]:
-        pad_right = (self.window_size - width % self.window_size) % self.window_size
-        pad_bottom = (self.window_size - height % self.window_size) % self.window_size
+    def maybe_pad(
+        self, hidden_states: tf.Tensor, window_size: int, height: int, width: int
+    ) -> Tuple[tf.Tensor, tf.Tensor]:
+        pad_right = (window_size - width % window_size) % window_size
+        pad_bottom = (window_size - height % window_size) % window_size
         pad_values = [[0, 0], [0, pad_bottom], [0, pad_right], [0, 0]]
         hidden_states = tf.pad(hidden_states, pad_values)
         pad_values = tf.reshape(pad_values, (-1,))
@@ -707,7 +727,7 @@ class TFSwinLayer(tf.keras.layers.Layer):
         self,
         hidden_states: tf.Tensor,
         input_dimensions: Tuple[int, int],
-        head_mask: Optional[tf.Tensor] = None,
+        head_mask: tf.Tensor | None = None,
         output_attentions: bool = False,
         training: bool = False,
     ) -> tf.Tensor:
@@ -723,7 +743,7 @@ class TFSwinLayer(tf.keras.layers.Layer):
         hidden_states = self.layernorm_before(hidden_states, training=training)
         hidden_states = tf.reshape(hidden_states, (batch_size, height, width, channels))
         # pad hidden_states to multiples of window size
-        hidden_states, pad_values = self.maybe_pad(hidden_states, height, width)
+        hidden_states, pad_values = self.maybe_pad(hidden_states, window_size, height, width)
 
         _, height_pad, width_pad, _ = shape_list(hidden_states)
         # cyclic shift
@@ -780,7 +800,7 @@ class TFSwinStage(tf.keras.layers.Layer):
         num_heads: int,
         drop_path: List[float],
         downsample: Optional[Callable],
-        **kwargs
+        **kwargs,
     ) -> None:
         super().__init__(**kwargs)
         self.config = config
@@ -814,7 +834,7 @@ class TFSwinStage(tf.keras.layers.Layer):
         self,
         hidden_states: tf.Tensor,
         input_dimensions: Tuple[int, int],
-        head_mask: Optional[tf.Tensor] = None,
+        head_mask: tf.Tensor | None = None,
         output_attentions: Optional[bool] = False,
         training: bool = False,
     ) -> Tuple[tf.Tensor, ...]:
@@ -868,7 +888,7 @@ class TFSwinEncoder(tf.keras.layers.Layer):
         self,
         hidden_states: tf.Tensor,
         input_dimensions: Tuple[int, int],
-        head_mask: Optional[tf.Tensor] = None,
+        head_mask: tf.Tensor | None = None,
         output_attentions: bool = False,
         output_hidden_states: bool = False,
         return_dict: bool = True,
@@ -937,29 +957,6 @@ class TFSwinPreTrainedModel(TFPreTrainedModel):
         if isinstance(module, TFSwinEncoder):
             module.gradient_checkpointing = value
 
-    @property
-    def dummy_inputs(self) -> Dict[str, tf.Tensor]:
-        """
-        Dummy inputs to build the network. Returns:
-            `Dict[str, tf.Tensor]`: The dummy inputs.
-        """
-        VISION_DUMMY_INPUTS = tf.random.uniform(
-            shape=(3, self.config.num_channels, self.config.image_size, self.config.image_size),
-            dtype=tf.float32,
-        )
-        return {"pixel_values": tf.constant(VISION_DUMMY_INPUTS)}
-
-    @tf.function(
-        input_signature=[
-            {
-                "pixel_values": tf.TensorSpec((None, None, None, None), tf.float32, name="pixel_values"),
-            }
-        ]
-    )
-    def serving(self, inputs):
-        output = self.call(inputs)
-        return self.serving_output(output)
-
 
 SWIN_START_DOCSTRING = r"""
     This model is a Tensorflow
@@ -976,8 +973,8 @@ SWIN_START_DOCSTRING = r"""
 SWIN_INPUTS_DOCSTRING = r"""
     Args:
         pixel_values (`tf.Tensor` of shape `(batch_size, num_channels, height, width)`):
-            Pixel values. Pixel values can be obtained using [`AutoFeatureExtractor`]. See
-            [`AutoFeatureExtractor.__call__`] for details.
+            Pixel values. Pixel values can be obtained using [`AutoImageProcessor`]. See [`ViTImageProcessor.__call__`]
+            for details.
         head_mask (`tf.Tensor` of shape `(num_heads,)` or `(num_layers, num_heads)`, *optional*):
             Mask to nullify selected heads of the self-attention modules. Mask values selected in `[0, 1]`:
 
@@ -1110,9 +1107,9 @@ class TFSwinMainLayer(tf.keras.layers.Layer):
     @unpack_inputs
     def call(
         self,
-        pixel_values: Optional[tf.Tensor] = None,
-        bool_masked_pos: Optional[tf.Tensor] = None,
-        head_mask: Optional[tf.Tensor] = None,
+        pixel_values: tf.Tensor | None = None,
+        bool_masked_pos: tf.Tensor | None = None,
+        head_mask: tf.Tensor | None = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
@@ -1183,7 +1180,6 @@ class TFSwinModel(TFSwinPreTrainedModel):
 
     @add_start_docstrings_to_model_forward(SWIN_INPUTS_DOCSTRING)
     @add_code_sample_docstrings(
-        processor_class=_FEAT_EXTRACTOR_FOR_DOC,
         checkpoint=_CHECKPOINT_FOR_DOC,
         output_type=TFSwinModelOutput,
         config_class=_CONFIG_FOR_DOC,
@@ -1193,14 +1189,18 @@ class TFSwinModel(TFSwinPreTrainedModel):
     @unpack_inputs
     def call(
         self,
-        pixel_values: Optional[tf.Tensor] = None,
-        bool_masked_pos: Optional[tf.Tensor] = None,
-        head_mask: Optional[tf.Tensor] = None,
+        pixel_values: tf.Tensor | None = None,
+        bool_masked_pos: tf.Tensor | None = None,
+        head_mask: tf.Tensor | None = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         training: bool = False,
     ) -> Union[TFSwinModelOutput, Tuple[tf.Tensor, ...]]:
+        r"""
+        bool_masked_pos (`tf.Tensor` of shape `(batch_size, num_patches)`, *optional*):
+            Boolean masked positions. Indicates which patches are masked (1) and which aren't (0).
+        """
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -1221,16 +1221,6 @@ class TFSwinModel(TFSwinPreTrainedModel):
         )
 
         return swin_outputs
-
-    def serving_output(self, output: TFSwinModelOutput) -> TFSwinModelOutput:
-        # hidden_states and attentions not converted to Tensor with tf.convert_to_tensor as they are all of different dimensions
-        return TFSwinModelOutput(
-            last_hidden_state=output.last_hidden_state,
-            pooler_output=output.pooler_output,
-            hidden_states=output.hidden_states,
-            attentions=output.attentions,
-            reshaped_hidden_states=output.reshaped_hidden_states,
-        )
 
 
 class TFSwinPixelShuffle(tf.keras.layers.Layer):
@@ -1296,9 +1286,9 @@ class TFSwinForMaskedImageModeling(TFSwinPreTrainedModel):
     @unpack_inputs
     def call(
         self,
-        pixel_values: Optional[tf.Tensor] = None,
-        bool_masked_pos: Optional[tf.Tensor] = None,
-        head_mask: Optional[tf.Tensor] = None,
+        pixel_values: tf.Tensor | None = None,
+        bool_masked_pos: tf.Tensor | None = None,
+        head_mask: tf.Tensor | None = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
@@ -1312,7 +1302,7 @@ class TFSwinForMaskedImageModeling(TFSwinPreTrainedModel):
 
         Examples:
         ```python
-        >>> from transformers import AutoFeatureExtractor, TFSwinForMaskedImageModeling
+        >>> from transformers import AutoImageProcessor, TFSwinForMaskedImageModeling
         >>> import tensorflow as tf
         >>> from PIL import Image
         >>> import requests
@@ -1320,16 +1310,16 @@ class TFSwinForMaskedImageModeling(TFSwinPreTrainedModel):
         >>> url = "http://images.cocodataset.org/val2017/000000039769.jpg"
         >>> image = Image.open(requests.get(url, stream=True).raw)
 
-        >>> feature_extractor = AutoFeatureExtractor.from_pretrained("microsoft/swin-tiny-patch4-window7-224")
+        >>> image_processor = AutoImageProcessor.from_pretrained("microsoft/swin-tiny-patch4-window7-224")
         >>> model = TFSwinForMaskedImageModeling.from_pretrained("microsoft/swin-tiny-patch4-window7-224")
 
         >>> num_patches = (model.config.image_size // model.config.patch_size) ** 2
-        >>> pixel_values = feature_extractor(images=image, return_tensors="tf").pixel_values
+        >>> pixel_values = image_processor(images=image, return_tensors="tf").pixel_values
         >>> # create random boolean mask of shape (batch_size, num_patches)
         >>> bool_masked_pos = tf.random.uniform((1, num_patches)) >= 0.5
 
         >>> outputs = model(pixel_values, bool_masked_pos=bool_masked_pos)
-        >>> loss, reconstructed_pixel_values = outputs.loss, outputs.logits
+        >>> loss, reconstructed_pixel_values = outputs.loss, outputs.reconstruction
         >>> list(reconstructed_pixel_values.shape)
         [1, 3, 224, 224]
         ```"""
@@ -1373,6 +1363,7 @@ class TFSwinForMaskedImageModeling(TFSwinPreTrainedModel):
             total_loss = tf.reduce_sum(reconstruction_loss * mask)
             num_masked_pixels = (tf.reduce_sum(mask) + 1e-5) * self.config.num_channels
             masked_im_loss = total_loss / num_masked_pixels
+            masked_im_loss = tf.reshape(masked_im_loss, (1,))
 
         if not return_dict:
             output = (reconstructed_pixel_values,) + outputs[2:]
@@ -1380,19 +1371,10 @@ class TFSwinForMaskedImageModeling(TFSwinPreTrainedModel):
 
         return TFSwinMaskedImageModelingOutput(
             loss=masked_im_loss,
-            logits=reconstructed_pixel_values,
+            reconstruction=reconstructed_pixel_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
             reshaped_hidden_states=outputs.reshaped_hidden_states,
-        )
-
-    def serving_output(self, output: TFSwinMaskedImageModelingOutput) -> TFSwinMaskedImageModelingOutput:
-        # hidden_states and attentions not converted to Tensor with tf.convert_to_tensor as they are all of different dimensions
-        return TFSwinMaskedImageModelingOutput(
-            logits=output.logits,
-            hidden_states=output.hidden_states,
-            attentions=output.attentions,
-            reshaped_hidden_states=output.reshaped_hidden_states,
         )
 
 
@@ -1419,7 +1401,6 @@ class TFSwinForImageClassification(TFSwinPreTrainedModel, TFSequenceClassificati
 
     @add_start_docstrings_to_model_forward(SWIN_INPUTS_DOCSTRING)
     @add_code_sample_docstrings(
-        processor_class=_FEAT_EXTRACTOR_FOR_DOC,
         checkpoint=_IMAGE_CLASS_CHECKPOINT,
         output_type=TFSwinImageClassifierOutput,
         config_class=_CONFIG_FOR_DOC,
@@ -1428,9 +1409,9 @@ class TFSwinForImageClassification(TFSwinPreTrainedModel, TFSequenceClassificati
     @unpack_inputs
     def call(
         self,
-        pixel_values: Optional[tf.Tensor] = None,
-        head_mask: Optional[tf.Tensor] = None,
-        labels: Optional[tf.Tensor] = None,
+        pixel_values: tf.Tensor | None = None,
+        head_mask: tf.Tensor | None = None,
+        labels: tf.Tensor | None = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
@@ -1469,13 +1450,4 @@ class TFSwinForImageClassification(TFSwinPreTrainedModel, TFSequenceClassificati
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
             reshaped_hidden_states=outputs.reshaped_hidden_states,
-        )
-
-    def serving_output(self, output: TFSwinImageClassifierOutput) -> TFSwinImageClassifierOutput:
-        # hidden_states and attentions not converted to Tensor with tf.convert_to_tensor as they are all of different dimensions
-        return TFSwinImageClassifierOutput(
-            logits=output.logits,
-            hidden_states=output.hidden_states,
-            attentions=output.attentions,
-            reshaped_hidden_states=output.reshaped_hidden_states,
         )

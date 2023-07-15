@@ -27,6 +27,7 @@ from transformers.testing_utils import require_torch, require_vision, slow, torc
 
 from ...test_configuration_common import ConfigTester
 from ...test_modeling_common import ModelTesterMixin, floats_tensor, ids_tensor
+from ...test_pipeline_mixin import PipelineTesterMixin
 
 
 if is_torch_available():
@@ -45,7 +46,7 @@ if is_torch_available():
 if is_vision_available():
     from PIL import Image
 
-    from transformers import LevitFeatureExtractor
+    from transformers import LevitImageProcessor
 
 
 class LevitConfigTester(ConfigTester):
@@ -163,7 +164,7 @@ class LevitModelTester:
 
 
 @require_torch
-class LevitModelTest(ModelTesterMixin, unittest.TestCase):
+class LevitModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
     """
     Here we also overwrite some of the tests of test_modeling_common.py, as Levit does not use input_ids, inputs_embeds,
     attention_mask and seq_length.
@@ -173,6 +174,14 @@ class LevitModelTest(ModelTesterMixin, unittest.TestCase):
         (LevitModel, LevitForImageClassification, LevitForImageClassificationWithTeacher)
         if is_torch_available()
         else ()
+    )
+    pipeline_model_mapping = (
+        {
+            "feature-extraction": LevitModel,
+            "image-classification": (LevitForImageClassification, LevitForImageClassificationWithTeacher),
+        }
+        if is_torch_available()
+        else {}
     )
 
     test_pruning = False
@@ -273,6 +282,10 @@ class LevitModelTest(ModelTesterMixin, unittest.TestCase):
 
             check_hidden_states_output(inputs_dict, config, model_class)
 
+    @unittest.skip("Will be fixed soon by reducing the size of the model used for common tests.")
+    def test_model_is_small(self):
+        pass
+
     def _prepare_for_class(self, inputs_dict, model_class, return_labels=False):
         inputs_dict = super()._prepare_for_class(inputs_dict, model_class, return_labels=return_labels)
 
@@ -355,7 +368,6 @@ class LevitModelTest(ModelTesterMixin, unittest.TestCase):
 
             for problem_type in problem_types:
                 with self.subTest(msg=f"Testing {model_class} with {problem_type['title']}"):
-
                     config.problem_type = problem_type["title"]
                     config.num_labels = problem_type["num_labels"]
 
@@ -401,8 +413,8 @@ def prepare_img():
 @require_vision
 class LevitModelIntegrationTest(unittest.TestCase):
     @cached_property
-    def default_feature_extractor(self):
-        return LevitFeatureExtractor.from_pretrained(LEVIT_PRETRAINED_MODEL_ARCHIVE_LIST[0])
+    def default_image_processor(self):
+        return LevitImageProcessor.from_pretrained(LEVIT_PRETRAINED_MODEL_ARCHIVE_LIST[0])
 
     @slow
     def test_inference_image_classification_head(self):
@@ -410,9 +422,9 @@ class LevitModelIntegrationTest(unittest.TestCase):
             torch_device
         )
 
-        feature_extractor = self.default_feature_extractor
+        image_processor = self.default_image_processor
         image = prepare_img()
-        inputs = feature_extractor(images=image, return_tensors="pt").to(torch_device)
+        inputs = image_processor(images=image, return_tensors="pt").to(torch_device)
 
         # forward pass
         with torch.no_grad():

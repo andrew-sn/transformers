@@ -49,7 +49,7 @@ RAG_CONFIG_DOC = r"""
             `"compressed"`.
         index_path (`str`, *optional*)
             The path to the serialized faiss index on disk.
-        passages_path: (`str`, *optional*):
+        passages_path (`str`, *optional*):
             A path to text passages compatible with the faiss index. Required if using
             [`~models.rag.retrieval_rag.LegacyIndex`]
         use_dummy_dataset (`bool`, *optional*, defaults to `False`)
@@ -112,7 +112,7 @@ class RagConfig(PretrainedConfig):
         output_retrieved=False,
         use_cache=True,
         forced_eos_token_id=None,
-        **kwargs
+        **kwargs,
     ):
         super().__init__(
             bos_token_id=bos_token_id,
